@@ -86,7 +86,12 @@ func (o *OVHProvider) Name() string {
 }
 
 // UpdateRecords updates DNS records for the given domain with the provided IPs
-func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error {
+func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, ips []string) error {
+	// The OVH provider supports A records only
+	if recordType != config.RecordTypeA {
+		return fmt.Errorf("the OVH provider only supports %s records, not '%s'", config.RecordTypeA, recordType)
+	}
+
 	// First, get existing records
 	existingRecords, err := o.getExistingRecords(ctx, domain)
 	if err != nil {

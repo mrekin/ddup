@@ -106,7 +106,12 @@ func (a *AzureProvider) Name() string {
 }
 
 // UpdateRecords updates DNS records for the given domain with the provided IPs
-func (a *AzureProvider) UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error {
+func (a *AzureProvider) UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, ips []string) error {
+	// The Azure DNS provider supports A records only
+	if recordType != config.RecordTypeA {
+		return fmt.Errorf("the Azure DNS provider only supports %s records, not '%s'", config.RecordTypeA, recordType)
+	}
+
 	// First, get existing records
 	currentIPs, err := a.getExistingIPs(ctx, domain)
 	if err != nil {

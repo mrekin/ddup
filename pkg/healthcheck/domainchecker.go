@@ -12,6 +12,7 @@ type domainChecker struct {
 	lock        sync.Mutex
 	checker     checker.Checker
 	ttl         int
+	recordType  string
 	healthyIPs  []string
 	failedIPs   map[string]int
 	provider    dns.Provider

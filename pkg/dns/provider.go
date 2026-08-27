@@ -12,8 +12,10 @@ import (
 type Provider interface {
 	// Name returns the provider's name
 	Name() string
-	// UpdateRecords updates DNS records for the given domain with the provided IPs
-	UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error
+	// UpdateRecords updates DNS records for the given domain.
+	// recordType is the DNS record type ("A" or "CNAME"); values holds the record
+	// contents: IP addresses for A records, target hostnames for CNAME records.
+	UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, values []string) error
 }
 
 // NewProvider creates a new DNS provider based on the configuration

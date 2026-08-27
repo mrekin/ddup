@@ -33,10 +33,11 @@ func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.
 			return nil, fmt.Errorf("domain '%s' references DNS provider '%s' that is not configured", d.RecordName, d.Provider)
 		}
 		dcs[d.RecordName] = &domainChecker{
-			checker:   checker.New(d.RecordName, d.Endpoints, d.HealthChecks, metrics),
-			ttl:       d.TTL,
-			failedIPs: make(map[string]int, 0),
-			provider:  provider,
+			checker:    checker.New(d.RecordName, d.Endpoints, d.HealthChecks, metrics),
+			ttl:        d.TTL,
+			recordType: d.RecordType,
+			failedIPs:  make(map[string]int, 0),
+			provider:   provider,
 		}
 	}
 
@@ -112,11 +113,19 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 			}
 		}
 
+		// CNAME records can hold a single value per name: keep only the first healthy value (config order)
+		if dc.recordType == config.RecordTypeCNAME && len(newHealthyIPs) > 1 {
+			skipped := newHealthyIPs[1:]
+			newHealthyIPs = newHealthyIPs[:1]
+			domainLog.WarnContext(ctx, "Multiple healthy endpoints for CNAME record; only the first one is used",
+				"selected", newHealthyIPs[0], "skipped", skipped)
+		}
+
 		// Check if healthy IPs have changed
 		if !utils.ElementsMatch(currentHealthyIPs, newHealthyIPs) {
 			// Update DNS records
 			if len(newHealthyIPs) > 0 {
-				err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, newHealthyIPs)
+				err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.recordType, dc.ttl, newHealthyIPs)
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
 					dc.setError("Error updating DNS records: " + err.Error())
@@ -125,7 +134,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					continue
 				}
 
-				domainLog.InfoContext(ctx, "Updated DNS records", "ips", newHealthyIPs)
+				domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", newHealthyIPs)
 			} else {
 				domainLog.WarnContext(ctx, "No healthy endpoints found, not updating DNS")
 			}

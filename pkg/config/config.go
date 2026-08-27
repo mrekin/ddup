@@ -5,8 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"reflect"
+	"strings"
 	"time"
+)
+
+// Supported DNS record types
+const (
+	// RecordTypeA manages IPv4 address records (the default)
+	RecordTypeA = "A"
+	// RecordTypeCNAME manages a CNAME record; the endpoints' `ip` field holds the target hostname
+	RecordTypeCNAME = "CNAME"
 )
 
 // Config represents the application configuration
@@ -44,6 +54,14 @@ type ConfigDomain struct {
 	// +required
 	Provider string `yaml:"provider"`
 
+	// Type of DNS record to manage for this domain.
+	// Supported values: "A" (default) and "CNAME".
+	// CNAME records are supported by the Cloudflare provider only.
+	// The endpoints' `ip` field carries the record value: for CNAME domains it is the
+	// target hostname (e.g. "ref"), not an IP address.
+	// +default "A"
+	RecordType string `yaml:"recordType"`
+
 	// TTL for the created records, in seconds
 	// +default 60
 	TTL int `yaml:"ttl"`
@@ -77,7 +95,8 @@ type ConfigEndpoint struct {
 	// +required
 	URL string `yaml:"url"`
 
-	// IP address to include in DNS records when healthy
+	// IP address to include in DNS records when healthy.
+	// For domains with recordType "CNAME", this is the CNAME target hostname instead.
 	// +required
 	IP string `yaml:"ip"`
 
@@ -210,7 +229,8 @@ func (c *Config) Validate(logger *slog.Logger) error {
 
 	// Validate domains
 	for di := range c.Domains {
-		d := c.Domains[di]
+		// Use a pointer so default values are persisted to the slice
+		d := &c.Domains[di]
 		if d.RecordName == "" {
 			return fmt.Errorf("domain %d is invalid: recordName is empty", di)
 		}
@@ -227,6 +247,20 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			return fmt.Errorf("domain %d is invalid: provider '%s' does not exist in the provider configuration", di, d.Provider)
 		}
 
+		// Validate the record type; the default is "A"
+		d.RecordType = strings.ToUpper(strings.TrimSpace(d.RecordType))
+		switch d.RecordType {
+		case "", RecordTypeA:
+			d.RecordType = RecordTypeA
+		case RecordTypeCNAME:
+			// CNAME records are implemented by the Cloudflare provider only
+			if p := c.Providers[d.Provider]; p.Cloudflare == nil {
+				return fmt.Errorf("domain %s is invalid: recordType '%s' is only supported by the Cloudflare provider, but provider '%s' is not a Cloudflare provider", d.RecordName, d.RecordType, d.Provider)
+			}
+		default:
+			return fmt.Errorf("domain %s is invalid: recordType must be %q or %q (got '%s')", d.RecordName, RecordTypeA, RecordTypeCNAME, d.RecordType)
+		}
+
 		// Default TTL is 120s
 		if d.TTL <= 0 {
 			d.TTL = 120
@@ -239,6 +273,10 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			}
 			if v.IP == "" {
 				return fmt.Errorf("domain %s endpoint %d is invalid: IP is empty", d.RecordName, ei)
+			}
+			// A CNAME target must be a hostname, not an IP address
+			if d.RecordType == RecordTypeCNAME && net.ParseIP(strings.TrimSpace(v.IP)) != nil {
+				return fmt.Errorf("domain %s endpoint %d is invalid: ip '%s' is an IP address, which is not a valid target for a CNAME record", d.RecordName, ei, v.IP)
 			}
 			if v.Name == "" {
 				v.Name = v.URL
