@@ -123,34 +123,28 @@ func (c *checker) checkEndpoint(ctx context.Context, endpoint *config.ConfigEndp
 	req.Header.Set("User-Agent", "ddup/1.0")
 
 	// If there's a specific host, we need to set it in the request's host
-	// For TLS requests, we set it the TLS client for SNI in the TLS handshake to work too
+	// For TLS requests, we set it in the TLS client config so the SNI in the TLS handshake works too.
+	// Note the client is cloned: requests for different endpoints run concurrently and must never share
+	// a transport with a pinned TLS ServerName, or requests to other endpoints would be sent with the wrong SNI
 	client := c.client
 	if endpoint.Host != "" {
 		req.Host = endpoint.Host
 
 		if req.URL.Scheme == "https" {
-			var transport *http.Transport
-			if client.Transport != nil {
-				var ok bool
-				transport, ok = client.Transport.(*http.Transport)
-				if !ok || transport.TLSClientConfig == nil {
-					transport.TLSClientConfig = &tls.Config{
-						MinVersion: tls.VersionTLS12,
-					}
-				} else {
-					transport = transport.Clone()
-				}
-
-				transport.TLSClientConfig.ServerName = endpoint.Host
-			} else {
-				transport = &http.Transport{
-					TLSClientConfig: &tls.Config{
-						MinVersion: tls.VersionTLS12,
-						ServerName: endpoint.Host,
-					},
+			transport := &http.Transport{}
+			if t, ok := c.client.Transport.(*http.Transport); ok {
+				transport = t.Clone()
+			}
+			if transport.TLSClientConfig == nil {
+				transport.TLSClientConfig = &tls.Config{
+					MinVersion: tls.VersionTLS12,
 				}
 			}
-			client.Transport = transport
+			transport.TLSClientConfig.ServerName = endpoint.Host
+
+			cloned := *c.client
+			cloned.Transport = transport
+			client = &cloned
 		}
 	}
 
