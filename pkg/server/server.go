@@ -101,6 +101,11 @@ func (s *Server) initAppServer() (err error) {
 		respondWithJSON(r.Context(), w, s.hc.GetAllDomainsStatus())
 	})
 
+	// Aggregated status with the same information rendered by the dashboard
+	mux.HandleFunc("GET /api/summary", func(w http.ResponseWriter, r *http.Request) {
+		respondWithJSON(r.Context(), w, getStatusSummary(s.hc.GetAllDomainsStatus()))
+	})
+
 	// Add static files (includes dashboard)
 	err = registerStatic(mux)
 	if err != nil {
