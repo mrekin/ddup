@@ -210,6 +210,45 @@ providers:
 - `enabled`: Enable the server (disabled by default)
 - `bind`: Address to bind to (defaults to `127.0.0.1`)
 - `port`: Port to listen on (defaults to `7401`)
+- `basePath`: Base path under which the web dashboard and the API are served. For example, with `basePath: "ddup"`, the dashboard is available at `/ddup/` and the API at `/ddup/api/...`. Leading and trailing slashes are optional. When empty (default), everything is served from the root `/`.
+
+### Web Dashboard and API
+
+When the server is enabled, ddup serves a web dashboard with the status of all domains, plus a JSON API returning the same information:
+
+- `GET /api/status`: Raw status of all domains, as a map keyed by record name
+- `GET /api/status/{recordName}`: Status of a single domain
+- `GET /api/summary`: Aggregated status with the same information rendered by the dashboard: overall status of each domain (`healthy`, `warning`, or `unhealthy`), count of healthy endpoints, and summary counters
+
+Example response of `GET /api/summary`:
+
+```json
+{
+  "timestamp": "2026-08-28T09:16:00.123Z",
+  "summary": {
+    "totalDomains": 2,
+    "healthyDomains": 1,
+    "warningDomains": 1,
+    "unhealthyDomains": 0
+  },
+  "domains": [
+    {
+      "name": "service.example.com",
+      "status": "warning",
+      "provider": "cloudflare",
+      "lastUpdated": "2026-08-28T09:15:04.512Z",
+      "endpointsHealthy": 1,
+      "endpointsTotal": 2,
+      "endpoints": [
+        { "healthy": true, "ip": "192.168.1.100", "failureCount": 0 },
+        { "healthy": false, "ip": "192.168.1.101", "failureCount": 3 }
+      ]
+    }
+  ]
+}
+```
+
+All routes, including `GET /healthz`, are also available under the configured `basePath`.
 
 ### Logging Settings
 

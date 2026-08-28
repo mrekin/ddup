@@ -44,3 +44,7 @@ server:
   enabled: true
   bind: "127.0.0.1"
   port: 7401
+  # Optional base path under which the web dashboard and the API are served.
+  # For example, with basePath "ddup", the dashboard is available at "/ddup/" and the API at "/ddup/api/...".
+  # When empty, everything is served from the root "/"
+  # basePath: "ddup"

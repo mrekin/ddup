@@ -169,6 +169,20 @@ type ConfigServer struct {
 	// Port to listen on
 	// +default 7401
 	Port int `yaml:"port"`
+
+	// Base path under which the web dashboard and the API are served.
+	// For example, with basePath "ddup", the dashboard is available at "/ddup/" and the API at "/ddup/api/...".
+	// When empty (default), everything is served from the root "/"
+	BasePath string `yaml:"basePath"`
+}
+
+// GetBasePath returns the normalized base path: an empty string if unset, otherwise a path with a leading "/" and no trailing slash
+func (c ConfigServer) GetBasePath() string {
+	p := strings.Trim(strings.TrimSpace(c.BasePath), "/")
+	if p == "" {
+		return ""
+	}
+	return "/" + p
 }
 
 // ConfigDev includes options using during development only

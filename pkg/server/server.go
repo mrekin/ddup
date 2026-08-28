@@ -135,7 +135,25 @@ func (s *Server) initAppServer() (err error) {
 	// Add middlewares
 	s.handler = Use(mux, middlewares...)
 
+	// Serve the app under the configured base path, if any
+	if basePath := cfg.Server.GetBasePath(); basePath != "" {
+		s.handler = withBasePath(basePath, s.handler)
+	}
+
 	return nil
+}
+
+// withBasePath serves the given handler under a base path
+func withBasePath(basePath string, next http.Handler) http.Handler {
+	strip := http.StripPrefix(basePath, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Redirect requests without the trailing slash (e.g. "/ddup" to "/ddup/")
+		if r.URL.Path == basePath {
+			http.Redirect(w, r, basePath+"/", http.StatusMovedPermanently)
+			return
+		}
+		strip.ServeHTTP(w, r)
+	})
 }
 
 // Run the web server
@@ -201,10 +219,14 @@ func (s *Server) startAppServer(ctx context.Context, appSrvErrCh chan<- error) e
 	}
 
 	// Start the HTTP(S) server in a background goroutine
-	slog.InfoContext(ctx, "App server started",
+	attrs := []slog.Attr{
 		slog.String("bind", cfg.Server.Bind),
 		slog.Int("port", cfg.Server.Port),
-	)
+	}
+	if basePath := cfg.Server.GetBasePath(); basePath != "" {
+		attrs = append(attrs, slog.String("basePath", basePath))
+	}
+	slog.LogAttrs(ctx, slog.LevelInfo, "App server started", attrs...)
 	go func() { //nolint:contextcheck
 		defer s.appListener.Close() //nolint:errcheck
 

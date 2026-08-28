@@ -70,13 +70,16 @@ func getStatusSummary(statuses map[string]healthcheck.DomainStatus) StatusSummar
 
 		// Classify the domain with the same logic used by the dashboard:
 		// domains with an error or no endpoints are unhealthy, then it depends on the number of healthy endpoints
-		state := domainStatusUnhealthy
+		var state string
 		switch {
 		case status.Error != "" || len(status.Endpoints) == 0:
+			state = domainStatusUnhealthy
 		case healthy == len(status.Endpoints):
 			state = domainStatusHealthy
 		case healthy > 0:
 			state = domainStatusWarning
+		default:
+			state = domainStatusUnhealthy
 		}
 
 		switch state {
