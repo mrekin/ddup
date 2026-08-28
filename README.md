@@ -240,7 +240,7 @@ Example response of `GET /api/summary`:
       "endpointsHealthy": 1,
       "endpointsTotal": 2,
       "endpoints": [
-        { "healthy": true, "ip": "192.168.1.100", "failureCount": 0 },
+        { "healthy": true, "ip": "192.168.1.100", "failureCount": 0, "inDns": true },
         { "healthy": false, "ip": "192.168.1.101", "failureCount": 3 }
       ]
     }

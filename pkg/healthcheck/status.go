@@ -1,6 +1,7 @@
 package healthcheck
 
 import (
+	"slices"
 	"time"
 )
 
@@ -15,6 +16,9 @@ type DomainStatusEndpoint struct {
 	Healthy      bool   `json:"healthy"`
 	IP           string `json:"ip"`
 	FailureCount int    `json:"failureCount,omitempty"`
+	// InDNS is true if this endpoint's value is currently written in the DNS record.
+	// Relevant for CNAME records, which hold a single value
+	InDNS bool `json:"inDns,omitempty"`
 }
 
 func (hc *HealthChecker) GetAllDomainsStatus() map[string]DomainStatus {
@@ -36,7 +40,7 @@ func (hc *HealthChecker) GetDomainStatus(domain string) *DomainStatus {
 }
 
 func (hc *HealthChecker) getStatusObject(dc *domainChecker) DomainStatus {
-	healthy, unhealthy, lastUpdated, lastError := dc.getState()
+	healthy, unhealthy, dnsValues, lastUpdated, lastError := dc.getState()
 
 	// Endpoints in the unhealthy list could also be in the healthy one,
 	// if they failed a recent health check but still less than the max attempts
@@ -46,6 +50,7 @@ func (hc *HealthChecker) getStatusObject(dc *domainChecker) DomainStatus {
 			Healthy:      true,
 			IP:           ip,
 			FailureCount: unhealthy[ip],
+			InDNS:        slices.Contains(dnsValues, ip),
 		})
 	}
 	for ip, attempts := range unhealthy {

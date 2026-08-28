@@ -9,6 +9,8 @@ interface DomainStatusEndpoint {
   healthy: boolean
   ip: string
   failureCount?: number
+  // True if this endpoint's value is currently written in the DNS record (CNAME records hold a single value)
+  inDns?: boolean
 }
 
 interface DomainStatus {
@@ -290,6 +292,11 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
                                   {endpoint.healthy ? 'Healthy' : 'Unhealthy'}
                                 </Badge>
                                 <span className="font-mono text-sm">{endpoint.ip}</span>
+                                {endpoint.inDns && (
+                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
+                                    DNS
+                                  </Badge>
+                                )}
                               </div>
                               <div className="text-right text-xs text-muted-foreground">
                                 <div>Failures: {endpoint.failureCount || '0'}</div>

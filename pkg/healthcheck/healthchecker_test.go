@@ -142,6 +142,7 @@ func TestHealthChecker_RetryLogic(t *testing.T) {
 				checker:    mockChecker,
 				ttl:        60,
 				healthyIPs: []string{"1.1.1.1", "2.2.2.2"}, // endpoint2 was previously healthy
+				dnsValues:  []string{"1.1.1.1", "2.2.2.2"}, // ...and was already written to DNS
 				failedIPs:  make(map[string]int),
 				provider:   mockProvider,
 			},
@@ -291,6 +292,7 @@ func TestHealthChecker_NoChangeSkipsUpdate(t *testing.T) {
 				checker:    mockChecker,
 				ttl:        60,
 				healthyIPs: []string{"1.1.1.1", "2.2.2.2"}, // Same as what will be returned
+				dnsValues:  []string{"1.1.1.1", "2.2.2.2"}, // ...and already written to DNS
 				failedIPs:  make(map[string]int),
 				provider:   mockProvider,
 			},
@@ -385,4 +387,68 @@ func TestHealthChecker_MultipleDomains(t *testing.T) {
 
 	assert.Equal(t, 1, mockProvider1.CallCount)
 	assert.Equal(t, 1, mockProvider2.CallCount)
+}
+
+func TestHealthChecker_CNAMEMultipleHealthy(t *testing.T) {
+	// Create mock provider that should not error
+	mockProvider := dns.NewMockProvider(false)
+
+	// Create mock endpoints
+	endpoints := []*config.ConfigEndpoint{
+		{Name: "endpoint1", IP: "main.example.com"},
+		{Name: "endpoint2", IP: "slave.example.com"},
+	}
+
+	// Create mock health check results - all healthy
+	results := []checker.Result{
+		{Endpoint: endpoints[0], Healthy: true},
+		{Endpoint: endpoints[1], Healthy: true},
+	}
+
+	// Create mock checker
+	mockChecker := &checker.MockChecker{
+		Domain:      "example.com",
+		MaxAttempts: 2,
+		Results:     results,
+	}
+
+	// Create the test HealthChecker for a CNAME domain
+	hc := &HealthChecker{
+		domainCheckers: map[string]*domainChecker{
+			"example.com": {
+				checker:    mockChecker,
+				ttl:        60,
+				recordType: config.RecordTypeCNAME,
+				healthyIPs: []string{},
+				failedIPs:  make(map[string]int),
+				provider:   mockProvider,
+			},
+		},
+	}
+
+	// Run the check
+	hc.checkAndUpdateDNS(t.Context())
+
+	dc := hc.domainCheckers["example.com"]
+
+	// All healthy endpoints are kept in the state (they are visible in the dashboard/API)
+	assert.ElementsMatch(t, []string{"main.example.com", "slave.example.com"}, dc.healthyIPs)
+
+	// Only the first healthy value (config order) is written to DNS
+	assert.Equal(t, []string{"main.example.com"}, dc.dnsValues)
+	assert.Equal(t, 1, mockProvider.CallCount)
+	assert.Equal(t, []string{"main.example.com"}, mockProvider.LastValues)
+
+	// The status shows both endpoints, with the one in DNS marked
+	status := hc.GetDomainStatus("example.com")
+	require.NotNil(t, status)
+	require.Len(t, status.Endpoints, 2)
+	for _, ep := range status.Endpoints {
+		assert.True(t, ep.Healthy)
+		assert.Equal(t, ep.IP == "main.example.com", ep.InDNS, "only the CNAME target should be marked as in DNS")
+	}
+
+	// A second run with the same results must not update DNS again
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 1, mockProvider.CallCount)
 }
