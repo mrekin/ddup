@@ -86,13 +86,13 @@ func (o *OVHProvider) Name() string {
 }
 
 // UpdateRecords updates DNS records for the given domain with the provided IPs
-func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, ips []string) error {
-	// The OVH provider supports A records only
-	if recordType != config.RecordTypeA {
-		return fmt.Errorf("the OVH provider only supports %s records, not '%s'", config.RecordTypeA, recordType)
+func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error {
+	canonicalIPs, err := canonicalizeIPs(ips)
+	if err != nil {
+		return err
 	}
 
-	// First, get existing records
+	// First, get existing A and AAAA records.
 	existingRecords, err := o.getExistingRecords(ctx, domain)
 	if err != nil {
 		return fmt.Errorf("error getting existing records: %w", err)
@@ -101,13 +101,35 @@ func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, recordTy
 	// Map of existing IPs and record IDs
 	existingIPs := make(map[string]int64)
 	for _, record := range existingRecords {
-		existingIPs[record.Target] = record.ID
+		ip, err := canonicalizeIP(record.Target)
+		if err != nil {
+			return fmt.Errorf("invalid IP address in existing record %d: %w", record.ID, err)
+		}
+		existingIPs[ip] = record.ID
 	}
 
 	// Map of IPs we want to preserve
 	desiredIPs := make(map[string]struct{})
-	for _, ip := range ips {
+	for _, ip := range canonicalIPs {
 		desiredIPs[ip] = struct{}{}
+	}
+
+	// Create replacements before removing stale records so a failed create does not leave the domain empty.
+	createdIPs := make(map[string]struct{})
+	for _, ip := range canonicalIPs {
+		_, exists := existingIPs[ip]
+		_, created := createdIPs[ip]
+		if exists || created {
+			continue
+		}
+
+		slog.DebugContext(ctx, "Creating record for healthy IP", "ip", ip)
+
+		err = o.createRecord(ctx, domain, ip, ttl)
+		if err != nil {
+			return fmt.Errorf("error creating record for IP %s: %w", ip, err)
+		}
+		createdIPs[ip] = struct{}{}
 	}
 
 	// Delete records for IPs that are no longer healthy
@@ -122,21 +144,6 @@ func (o *OVHProvider) UpdateRecords(ctx context.Context, domain string, recordTy
 		err = o.deleteRecord(ctx, recordID)
 		if err != nil {
 			return fmt.Errorf("error deleting record %d for IP %s: %w", recordID, ip, err)
-		}
-	}
-
-	// Create new records for healthy IPs that don't exist yet
-	for _, ip := range ips {
-		_, exists := existingIPs[ip]
-		if exists {
-			continue
-		}
-
-		slog.DebugContext(ctx, "Creating record for healthy IP", "ip", ip)
-
-		err = o.createRecord(ctx, domain, ip, ttl)
-		if err != nil {
-			return fmt.Errorf("error creating record for IP %s: %w", ip, err)
 		}
 	}
 
@@ -180,15 +187,27 @@ func (o *OVHProvider) getExistingRecords(ctx context.Context, domain string) ([]
 		}
 	}
 
-	url := fmt.Sprintf("%s/domain/zone/%s/record?fieldType=A&subDomain=%s", o.endpoint, o.zoneName, subDomain)
-
 	var recordIDs []int64
-	err := o.performJSONRequest(ctx, http.MethodGet, url, nil, &recordIDs)
-	if err != nil {
-		return nil, err
+
+	for _, recordType := range []string{recordTypeA, recordTypeAAAA} {
+		url := fmt.Sprintf(
+			"%s/domain/zone/%s/record?fieldType=%s&subDomain=%s",
+			o.endpoint,
+			o.zoneName,
+			recordType,
+			subDomain,
+		)
+
+		var typeRecordIDs []int64
+		err := o.performJSONRequest(ctx, http.MethodGet, url, nil, &typeRecordIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		recordIDs = append(recordIDs, typeRecordIDs...)
 	}
 
-	// Get detailed information for each record
+	// Get detailed information for each record.
 	records := make([]OVHRecord, len(recordIDs))
 	for i, recordID := range recordIDs {
 		record, err := o.getRecord(ctx, recordID)
@@ -259,14 +278,19 @@ func (o *OVHProvider) createRecord(ctx context.Context, domain, ip string, ttl i
 
 	url := o.endpoint + "/domain/zone/" + o.zoneName + "/record"
 
+	recordType, err := recordTypeForIP(ip)
+	if err != nil {
+		return err
+	}
+
 	record := OVHCreateRecordRequest{
-		FieldType: "A",
+		FieldType: recordType,
 		SubDomain: subDomain,
 		Target:    ip,
 		TTL:       ttl,
 	}
 
-	err := o.performJSONRequest(ctx, http.MethodPost, url, record, nil)
+	err = o.performJSONRequest(ctx, http.MethodPost, url, record, nil)
 	if err != nil {
 		return err
 	}

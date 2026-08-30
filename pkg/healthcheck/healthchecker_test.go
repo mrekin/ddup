@@ -437,7 +437,7 @@ func TestHealthChecker_CNAMEMultipleHealthy(t *testing.T) {
 	// Only the first healthy value (config order) is written to DNS
 	assert.Equal(t, []string{"main.example.com"}, dc.dnsValues)
 	assert.Equal(t, 1, mockProvider.CallCount)
-	assert.Equal(t, []string{"main.example.com"}, mockProvider.LastValues)
+	assert.Equal(t, "main.example.com", mockProvider.CNAMETarget)
 
 	// The status shows both endpoints, with the one in DNS marked
 	status := hc.GetDomainStatus("example.com")

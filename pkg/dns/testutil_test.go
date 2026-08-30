@@ -48,11 +48,12 @@ func (m *MockHTTPTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// Look for a matching response
 	response, exists := m.responses[key]
 	if !exists {
-		// Return a default 404 response if no mock is configured
 		response = &MockResponse{
 			StatusCode: 404,
 			Body:       `{"error": "Not Found"}`,
-			Headers:    map[string]string{"Content-Type": "application/json"},
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
 		}
 	}
 

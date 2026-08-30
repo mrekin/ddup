@@ -15,10 +15,12 @@ type MockProvider struct {
 	ShouldError bool
 	CallCount   int
 	// Arguments captured from the last UpdateRecords call
-	LastDomain     string
-	LastRecordType string
-	LastTTL        int
-	LastValues     []string
+	LastDomain   string
+	LastTTL      int
+	LastIPs      []string
+	// Arguments captured from the last UpdateCNAME call
+	CNAMETarget  string
+	CNAMEUpdated bool
 }
 
 // NewMockProvider creates a new MockProvider.
@@ -32,12 +34,24 @@ func (m MockProvider) Name() string {
 }
 
 // UpdateRecords implements the Provider interface.
-func (m *MockProvider) UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, values []string) error {
+func (m *MockProvider) UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error {
 	m.CallCount++
 	m.LastDomain = domain
-	m.LastRecordType = recordType
 	m.LastTTL = ttl
-	m.LastValues = values
+	m.LastIPs = ips
+	if m.ShouldError {
+		return errors.New("mock error")
+	}
+	return nil
+}
+
+// UpdateCNAME implements the CNAMEUpdater interface.
+func (m *MockProvider) UpdateCNAME(ctx context.Context, domain string, ttl int, target string) error {
+	m.CallCount++
+	m.LastDomain = domain
+	m.LastTTL = ttl
+	m.CNAMETarget = target
+	m.CNAMEUpdated = true
 	if m.ShouldError {
 		return errors.New("mock error")
 	}

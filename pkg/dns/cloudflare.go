@@ -47,60 +47,112 @@ func (c *CloudflareProvider) Name() string {
 	return c.name
 }
 
-// UpdateRecords updates DNS records of the given type for the given domain.
-// values holds the record contents: IP addresses for A records, target hostnames for CNAME records.
-func (c *CloudflareProvider) UpdateRecords(ctx context.Context, domain string, recordType string, ttl int, values []string) error {
-	switch recordType {
-	case config.RecordTypeA, config.RecordTypeCNAME:
-	default:
-		return fmt.Errorf("unsupported record type '%s'", recordType)
+// UpdateRecords updates DNS records for the given domain with the provided IPs
+func (c *CloudflareProvider) UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) error {
+	canonicalIPs, err := canonicalizeIPs(ips)
+	if err != nil {
+		return err
 	}
 
-	// First, get existing records
-	existingRecords, err := c.getExistingRecords(ctx, domain, recordType)
+	// First, get existing A and AAAA records.
+	existingRecords, err := c.getExistingRecords(ctx, domain)
 	if err != nil {
 		return fmt.Errorf("error getting existing records: %w", err)
 	}
 
-	// Map of existing values and record IDs
-	existingValues := make(map[string]string)
+	// Map of existing IPs and record IDs
+	existingIPs := make(map[string]string)
 	for _, record := range existingRecords {
-		existingValues[record.Content] = record.ID
+		ip, err := canonicalizeIP(record.Content)
+		if err != nil {
+			return fmt.Errorf("invalid IP address in existing record %s: %w", record.ID, err)
+		}
+		existingIPs[ip] = record.ID
 	}
 
-	// Map of values we want to preserve
-	desiredValues := make(map[string]struct{})
-	for _, value := range values {
-		desiredValues[value] = struct{}{}
+	// Map of IPs we want to preserve
+	desiredIPs := make(map[string]struct{})
+	for _, ip := range canonicalIPs {
+		desiredIPs[ip] = struct{}{}
 	}
 
-	// Delete records for values that are no longer healthy
-	for value, recordID := range existingValues {
-		_, ok := desiredValues[value]
+	// Create replacements before removing stale records so a failed create does not leave the domain empty.
+	createdIPs := make(map[string]struct{})
+	for _, ip := range canonicalIPs {
+		_, exists := existingIPs[ip]
+		_, created := createdIPs[ip]
+		if exists || created {
+			continue
+		}
+
+		slog.DebugContext(ctx, "Creating record for healthy IP", "ip", ip)
+
+		recordType, err := recordTypeForIP(ip)
+		if err != nil {
+			return err
+		}
+		err = c.createRecord(ctx, domain, recordType, ip, ttl)
+		if err != nil {
+			return fmt.Errorf("error creating record for IP %s: %w", ip, err)
+		}
+		createdIPs[ip] = struct{}{}
+	}
+
+	// Delete records for IPs that are no longer healthy.
+	for ip, recordID := range existingIPs {
+		_, ok := desiredIPs[ip]
 		if ok {
 			continue
 		}
 
-		slog.DebugContext(ctx, "Deleting record for unhealthy value", "value", value, "recordID", recordID)
+		slog.DebugContext(ctx, "Deleting record for unhealthy IP", "ip", ip, "recordID", recordID)
 
 		err = c.deleteRecord(ctx, recordID)
 		if err != nil {
-			return fmt.Errorf("error deleting record %s for value %s: %w", recordID, value, err)
+			return fmt.Errorf("error deleting record %s for IP %s: %w", recordID, ip, err)
 		}
 	}
 
-	// Create new records for healthy values that don't exist yet
-	for _, value := range values {
-		_, exists := existingValues[value]
-		if exists {
+	return nil
+}
+
+// UpdateCNAME updates the CNAME record for the given domain, pointing it at target.
+// It implements the CNAMEUpdater interface.
+func (c *CloudflareProvider) UpdateCNAME(ctx context.Context, domain string, ttl int, target string) error {
+	// First, get existing CNAME records
+	existingRecords, err := c.getExistingRecordsByType(ctx, domain, config.RecordTypeCNAME)
+	if err != nil {
+		return fmt.Errorf("error getting existing records: %w", err)
+	}
+
+	// Check whether the desired target already exists; other records are stale
+	var hasTarget bool
+	var staleRecordIDs []string
+	for _, record := range existingRecords {
+		if record.Content == target {
+			hasTarget = true
 			continue
 		}
+		staleRecordIDs = append(staleRecordIDs, record.ID)
+	}
 
-		slog.DebugContext(ctx, "Creating record for healthy value", "type", recordType, "value", value)
+	// Create the new record before removing stale ones so a failed create does not leave the domain without a record
+	if !hasTarget {
+		slog.DebugContext(ctx, "Creating CNAME record for healthy target", "domain", domain, "target", target)
 
-		err = c.createRecord(ctx, domain, recordType, value, ttl)
+		err = c.createRecord(ctx, domain, config.RecordTypeCNAME, target, ttl)
 		if err != nil {
-			return fmt.Errorf("error creating record for value %s: %w", value, err)
+			return fmt.Errorf("error creating record for target %s: %w", target, err)
+		}
+	}
+
+	// Delete stale records
+	for _, recordID := range staleRecordIDs {
+		slog.DebugContext(ctx, "Deleting stale CNAME record", "domain", domain, "recordID", recordID)
+
+		err = c.deleteRecord(ctx, recordID)
+		if err != nil {
+			return fmt.Errorf("error deleting record %s: %w", recordID, err)
 		}
 	}
 
@@ -134,16 +186,43 @@ func (ce CloudflareError) String() string {
 	return fmt.Sprintf("(%d) %s", ce.Code, ce.Message)
 }
 
-func (c *CloudflareProvider) getExistingRecords(ctx context.Context, domain string, recordType string) ([]CloudflareRecord, error) {
+func (c *CloudflareProvider) getExistingRecords(ctx context.Context, domain string) ([]CloudflareRecord, error) {
+	var records []CloudflareRecord
+
+	for _, recordType := range []string{recordTypeA, recordTypeAAAA} {
+		typeRecords, err := c.getExistingRecordsByType(ctx, domain, recordType)
+		if err != nil {
+			return nil, err
+		}
+
+		records = append(records, typeRecords...)
+	}
+
+	return records, nil
+}
+
+func (c *CloudflareProvider) getExistingRecordsByType(ctx context.Context, domain string, recordType string) ([]CloudflareRecord, error) {
 	start := time.Now()
 	var success bool
+
 	if c.metrics != nil {
 		defer func() {
-			c.metrics.RecordAPICall("cloudflare", http.MethodGet, fmt.Sprintf("/v4/zones/%s/dns_records", c.zoneID), success, time.Since(start))
+			c.metrics.RecordAPICall(
+				"cloudflare",
+				http.MethodGet,
+				fmt.Sprintf("/v4/zones/%s/dns_records", c.zoneID),
+				success,
+				time.Since(start),
+			)
 		}()
 	}
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?name=%s&type=%s", c.zoneID, domain, recordType)
+	url := fmt.Sprintf(
+		"https://api.cloudflare.com/client/v4/zones/%s/dns_records?name=%s&type=%s",
+		c.zoneID,
+		domain,
+		recordType,
+	)
 	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
@@ -209,7 +288,7 @@ func (c *CloudflareProvider) deleteRecord(ctx context.Context, recordID string) 
 	return nil
 }
 
-func (c *CloudflareProvider) createRecord(ctx context.Context, domain string, recordType string, content string, ttl int) error {
+func (c *CloudflareProvider) createRecord(ctx context.Context, domain, recordType, content string, ttl int) error {
 	start := time.Now()
 	var success bool
 	if c.metrics != nil {
@@ -218,7 +297,10 @@ func (c *CloudflareProvider) createRecord(ctx context.Context, domain string, re
 		}()
 	}
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", c.zoneID)
+	url := fmt.Sprintf(
+		"https://api.cloudflare.com/client/v4/zones/%s/dns_records",
+		c.zoneID,
+	)
 
 	record := map[string]any{
 		"type":    recordType,

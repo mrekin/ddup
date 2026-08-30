@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 	"time"
@@ -13,7 +13,8 @@ import (
 
 // Supported DNS record types
 const (
-	// RecordTypeA manages IPv4 address records (the default)
+	// RecordTypeA manages IPv4 and IPv6 address records (the default; the record type
+	// is detected automatically from each endpoint's IP address)
 	RecordTypeA = "A"
 	// RecordTypeCNAME manages a CNAME record; the endpoints' `ip` field holds the target hostname
 	RecordTypeCNAME = "CNAME"
@@ -288,9 +289,17 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			if v.IP == "" {
 				return fmt.Errorf("domain %s endpoint %d is invalid: IP is empty", d.RecordName, ei)
 			}
-			// A CNAME target must be a hostname, not an IP address
-			if d.RecordType == RecordTypeCNAME && net.ParseIP(strings.TrimSpace(v.IP)) != nil {
-				return fmt.Errorf("domain %s endpoint %d is invalid: ip '%s' is an IP address, which is not a valid target for a CNAME record", d.RecordName, ei, v.IP)
+			if d.RecordType == RecordTypeCNAME {
+				// A CNAME target must be a hostname, not an IP address
+				if _, err := netip.ParseAddr(strings.TrimSpace(v.IP)); err == nil {
+					return fmt.Errorf("domain %s endpoint %d is invalid: ip '%s' is an IP address, which is not a valid target for a CNAME record", d.RecordName, ei, v.IP)
+				}
+			} else {
+				ip, err := netip.ParseAddr(v.IP)
+				if err != nil {
+					return fmt.Errorf("domain %s endpoint %d is invalid: IP %q is not a valid IPv4 or IPv6 address", d.RecordName, ei, v.IP)
+				}
+				v.IP = ip.String()
 			}
 			if v.Name == "" {
 				v.Name = v.URL

@@ -127,7 +127,17 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		if !utils.ElementsMatch(currentDNSValues, dnsValues) {
 			// Update DNS records
 			if len(dnsValues) > 0 {
-				err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.recordType, dc.ttl, dnsValues)
+				if dc.recordType == config.RecordTypeCNAME {
+					// CNAME records are updated via the optional CNAMEUpdater interface
+					cu, ok := dc.provider.(dns.CNAMEUpdater)
+					if !ok {
+						err = fmt.Errorf("provider '%s' does not support CNAME records", dc.provider.Name())
+					} else {
+						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues[0])
+					}
+				} else {
+					err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues)
+				}
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
 					dc.setError("Error updating DNS records: " + err.Error())
