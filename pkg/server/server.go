@@ -244,6 +244,7 @@ func (s *Server) startAppServer(ctx context.Context, appSrvErrCh chan<- error) e
 }
 
 func respondWithJSON(ctx context.Context, w http.ResponseWriter, data any) {
+	w.Header().Add(headerContentType, jsonContentType)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	err := enc.Encode(data)
