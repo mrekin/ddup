@@ -1,5 +1,7 @@
 # ddup - Dynamic DNS Health Checker
 
+> **Fork note:** this is a fork of [ItalyPaleAle/ddup](https://github.com/ItalyPaleAle/ddup) with the following additions on top of upstream: CNAME record support (`recordType: CNAME`, Cloudflare provider only), a `server.basePath` option to serve the dashboard and API under a sub-path, a `GET /api/summary` endpoint returning the aggregated status of all domains as JSON, and fixes for the dashboard/API (status of all endpoints is shown, `host` option works correctly with multiple domains).
+
 ddup periodically checks the health of your services and updates the DNS records pointing to healthy deployments.
 
 You can use ddup to configure [round-robin DNS](https://en.wikipedia.org/wiki/Round-robin_DNS) for load balancing and failover, for internal or external apps, automatically excluding un-healthy replicas.
