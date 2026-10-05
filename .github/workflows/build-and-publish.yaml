@@ -24,6 +24,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
+          # Do not cache in release workflows
+          cache: false
 
       - name: Setup Node.js and pnpm
         uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
@@ -331,10 +333,15 @@ jobs:
 
           # An annotated tag carries a message; use it as the release notes.
           # A lightweight tag has no message, so fall back to auto-generated notes.
+          # Strip any Git signature block from the tag message so it doesn't leak into the release notes.
           notes_args=()
           tag_type=$(git tag -l --format='%(objecttype)' "${TAG}")
           if [[ "${tag_type}" == "tag" ]]; then
             tag_message=$(git tag -l --format='%(contents)' "${TAG}")
+            tag_signature=$(git tag -l --format='%(contents:signature)' "${TAG}")
+            if [[ -n "${tag_signature}" && "${tag_message}" == *"${tag_signature}" ]]; then
+              tag_message="${tag_message%"${tag_signature}"}"
+            fi
             if [[ -n "${tag_message}" ]]; then
               echo "Using tag annotation as release notes"
               notes_args=(--notes "${tag_message}")

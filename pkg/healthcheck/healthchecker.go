@@ -2,6 +2,7 @@ package healthcheck
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -20,7 +21,20 @@ import (
 type HealthChecker struct {
 	// Key is domain name
 	domainCheckers map[string]*domainChecker
+	// Requests to run a check right away; handled by Run, so checks never overlap
+	forceCh chan forceRequest
 }
+
+// If a check completed more recently than this, a forced check returns without running another
+// Forced checks count towards `attempts` and `recoverAfter` like scheduled ones, so this keeps repeated clicks from tripping thresholds
+const minForceInterval = 5 * time.Second
+
+type forceRequest struct {
+	done chan struct{}
+}
+
+// ErrNotRunning is returned by ForceCheck when the health checker's Run loop isn't active
+var ErrNotRunning = errors.New("health checker is not running")
 
 // NewHealthChecker creates a new HealthChecker instance
 func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.AppMetrics) (*HealthChecker, error) {
@@ -37,12 +51,14 @@ func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.
 			ttl:        d.TTL,
 			recordType: d.RecordType,
 			failedIPs:  make(map[string]int, 0),
+			recovering: make(map[string]int, 0),
 			provider:   provider,
 		}
 	}
 
 	return &HealthChecker{
 		domainCheckers: dcs,
+		forceCh:        make(chan forceRequest, 1),
 	}, nil
 }
 
@@ -53,6 +69,7 @@ func (hc *HealthChecker) Run(ctx context.Context) error {
 
 	// Run immediately
 	hc.checkAndUpdateDNS(ctx)
+	lastCheck := time.Now()
 
 	// Run on an interval until the context is canceled
 	ticker := time.NewTicker(cfg.Interval)
@@ -64,7 +81,40 @@ func (hc *HealthChecker) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			hc.checkAndUpdateDNS(ctx)
+			lastCheck = time.Now()
+		case req := <-hc.forceCh:
+			// A check that just finished is as good as a new one
+			if time.Since(lastCheck) >= minForceInterval {
+				slog.InfoContext(ctx, "Running forced health check")
+				hc.checkAndUpdateDNS(ctx)
+				lastCheck = time.Now()
+				// Restart the interval, so the next scheduled check isn't right after this one
+				ticker.Reset(cfg.Interval)
+			}
+			close(req.done)
 		}
+	}
+}
+
+// ForceCheck asks the Run loop to check all domains now, and waits for it to finish
+// If the context is canceled first, the check still completes in the background
+func (hc *HealthChecker) ForceCheck(ctx context.Context) error {
+	if hc.forceCh == nil {
+		return ErrNotRunning
+	}
+
+	req := forceRequest{done: make(chan struct{})}
+	select {
+	case hc.forceCh <- req:
+	case <-ctx.Done():
+		return fmt.Errorf("waiting to start check: %w", ctx.Err())
+	}
+
+	select {
+	case <-req.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for check to complete: %w", ctx.Err())
 	}
 }
 
@@ -84,6 +134,9 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		results := dc.checker.CheckAll(ctx)
 
 		// Collect healthy IPs
+		maxAttempts := dc.checker.GetMaxAttempts()
+		recoverAfter := dc.checker.GetRecoverAfter()
+		recovering := dc.getRecovering()
 		newHealthyIPs := make([]string, 0, len(results))
 		for _, result := range results {
 			ip := result.Endpoint.IP
@@ -91,14 +144,27 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 			// If the endpoint is healthy, save it in the healthy list and remove any record of recent failed attempts
 			if result.Healthy {
 				domainLog.DebugContext(ctx, "✓ Endpoint is healthy", "endpoint", result.Endpoint.Name, "ip", ip)
+
+				// An endpoint that was removed from DNS must pass recoverAfter consecutive checks before it's added back
+				// Endpoints that were not removed (including all endpoints on the first run) are added right away
+				if failedIPs[ip] >= maxAttempts && recoverAfter > 1 {
+					recovering[ip]++
+					if recovering[ip] < recoverAfter {
+						domainLog.InfoContext(ctx, "Endpoint is recovering", "endpoint", result.Endpoint.Name, "ip", ip, "passed", recovering[ip], "required", recoverAfter)
+						continue
+					}
+				}
+
 				newHealthyIPs = append(newHealthyIPs, ip)
 				delete(failedIPs, ip)
+				delete(recovering, ip)
 				continue
 			}
 
 			// Endpoint is unhealthy
 			domainLog.WarnContext(ctx, "✗ Endpoint health check failed", "endpoint", result.Endpoint.Name, "ip", ip, "error", result.Error)
 			failedIPs[ip]++
+			delete(recovering, ip)
 
 			// Prevent overflows
 			if failedIPs[ip] < 0 {
@@ -107,11 +173,11 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 
 			// If the number of attempts is less than the maximum, we consider the endpoint healthy if it was healthy before
 			// This is to allow for retries
-			maxAttempts := dc.checker.GetMaxAttempts()
 			if failedIPs[ip] < maxAttempts && slices.Contains(currentHealthyIPs, ip) {
 				newHealthyIPs = append(newHealthyIPs, ip)
 			}
 		}
+		dc.setRecovering(recovering)
 
 		// CNAME records hold a single value per name: only the first healthy endpoint (config order) is written to DNS,
 		// while all healthy endpoints are kept in the state and shown in the dashboard/API
@@ -127,6 +193,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		if !utils.ElementsMatch(currentDNSValues, dnsValues) {
 			// Update DNS records
 			if len(dnsValues) > 0 {
+				var res dns.UpdateResult
 				if dc.recordType == config.RecordTypeCNAME {
 					// CNAME records are updated via the optional CNAMEUpdater interface
 					cu, ok := dc.provider.(dns.CNAMEUpdater)
@@ -135,8 +202,10 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					} else {
 						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues[0])
 					}
+					// CNAME updaters don't report whether anything changed; we only get here when the values differ
+					res = dns.UpdateResult{Changed: true, Previous: currentDNSValues}
 				} else {
-					err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues)
+					res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues)
 				}
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
@@ -146,7 +215,11 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					continue
 				}
 
-				domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", dnsValues)
+				if res.Changed {
+					domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", dnsValues, "previous", res.Previous)
+				} else {
+					domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", dnsValues)
+				}
 			} else {
 				domainLog.WarnContext(ctx, "No healthy endpoints found, not updating DNS")
 			}
