@@ -7,7 +7,6 @@ import {
   RefreshCw,
   Activity,
   AlertTriangle,
-  BellOff,
   BellRing,
   CheckCircle,
   XCircle,
@@ -263,6 +262,22 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
     }
   }
 
+  // The bell on the notification button doubles as the delivery status indicator:
+  // green while notifications are delivered, red when the last attempt failed
+  const notificationsOk = notifications?.ok
+  const notificationBellClass =
+    notificationsOk === true
+      ? 'text-green-600 dark:text-green-400'
+      : notificationsOk === false
+        ? 'text-red-600 dark:text-red-400'
+        : 'text-muted-foreground'
+  const notificationButtonTitle =
+    notificationsOk === true
+      ? `Send a notification with the current status of all domains. Notifications are being delivered${notifications?.lastSuccess ? `: last sent ${new Date(notifications.lastSuccess).toLocaleTimeString()}` : ''}`
+      : notificationsOk === false
+        ? `Send a notification with the current status of all domains. Notifications are not being delivered${notifications?.lastError ? `: ${notifications.lastError}` : ''}${notifications?.lastAttempt ? ` (at ${new Date(notifications.lastAttempt).toLocaleTimeString()})` : ''}`
+        : 'Send a notification with the current status of all domains'
+
   const getDomainStatus = (domain: Domain) => {
     if (domain.status.error) {
       return 'unhealthy'
@@ -329,26 +344,6 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
               </div>
             )}
 
-            {/* Delivery status of push notifications; hidden until the backend reports at least one attempt */}
-            {notifications && typeof notifications.ok === 'boolean' && (
-              <div
-                className={cn(
-                  'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium',
-                  notifications.ok
-                    ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/50 dark:text-green-300'
-                    : 'border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300'
-                )}
-                title={
-                  notifications.ok
-                    ? `Notifications are being delivered${notifications.lastSuccess ? `: last sent ${new Date(notifications.lastSuccess).toLocaleTimeString()}` : ''}`
-                    : `Notifications are not being delivered${notifications.lastError ? `: ${notifications.lastError}` : ''}${notifications.lastAttempt ? ` (at ${new Date(notifications.lastAttempt).toLocaleTimeString()})` : ''}`
-                }
-              >
-                {notifications.ok ? <BellRing className="h-3.5 w-3.5" /> : <BellOff className="h-3.5 w-3.5" />}
-                {notifications.ok ? 'Notifications' : 'Notifications unavailable'}
-              </div>
-            )}
-
             <div className="flex gap-2">
               {/* Split button: the main part toggles auto-refresh, the chevron opens a menu to refresh right away */}
               <div className="flex">
@@ -404,10 +399,12 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
                   size="sm"
                   onClick={testNotificationClicked}
                   disabled={isSendingNotification || isLoading}
-                  title="Send a notification with the current status of all domains"
+                  title={notificationButtonTitle}
                   className="flex items-center gap-2"
                 >
-                  <BellRing className={cn('h-4 w-4', isSendingNotification && 'animate-pulse')} />
+                  <BellRing
+                    className={cn('h-4 w-4', notificationBellClass, !isSendingNotification && 'fill-current opacity-90', isSendingNotification && 'animate-pulse')}
+                  />
                   {isSendingNotification ? 'Sending…' : notificationSent ? 'Sent ✓' : 'Test notification'}
                 </Button>
               )}

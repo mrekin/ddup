@@ -321,21 +321,22 @@ func TestSampleConfig(t *testing.T) {
 }
 
 func TestValidateNotifications(t *testing.T) {
+	// Base on GetDefaultConfig, like the real startup path, so defaults that would trip validation don't go unnoticed
 	validConfig := func() *Config {
-		return &Config{
-			Providers: map[string]ConfigProvider{
-				"test": {Cloudflare: &CloudflareConfig{}},
-			},
-			Domains: []ConfigDomain{
-				{
-					RecordName: "test.example.com",
-					Provider:   "test",
-					Endpoints: []*ConfigEndpoint{
-						{URL: "https://test.example.com/health", IP: "192.0.2.1"},
-					},
+		cfg := GetDefaultConfig()
+		cfg.Providers = map[string]ConfigProvider{
+			"test": {Cloudflare: &CloudflareConfig{}},
+		}
+		cfg.Domains = []ConfigDomain{
+			{
+				RecordName: "test.example.com",
+				Provider:   "test",
+				Endpoints: []*ConfigEndpoint{
+					{URL: "https://test.example.com/health", IP: "192.0.2.1"},
 				},
 			},
 		}
+		return cfg
 	}
 
 	tests := []struct {
@@ -348,6 +349,8 @@ func TestValidateNotifications(t *testing.T) {
 			assertFn: func(t *testing.T, cfg *Config, err error) {
 				require.NoError(t, err)
 				assert.False(t, cfg.Notifications.IsEnabled())
+				assert.Empty(t, cfg.Notifications.Server)
+				assert.Zero(t, cfg.Notifications.Timeout)
 			},
 		},
 		{
@@ -393,7 +396,7 @@ func TestValidateNotifications(t *testing.T) {
 		},
 		{
 			name:          "topic that is too long",
-			notifications: ConfigNotifications{Topic: strings.Repeat("a", 65)},
+			notifications: ConfigNotifications{Topic: strings.Repeat("a", 129)},
 			assertFn: func(t *testing.T, _ *Config, err error) {
 				require.ErrorContains(t, err, "notifications.topic is invalid")
 			},

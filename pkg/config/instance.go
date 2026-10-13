@@ -31,6 +31,7 @@ func Get() *Config {
 }
 
 // GetDefaultConfig returns the default configuration.
+// Notifications defaults are not seeded here: the zero value means disabled, and the server and timeout defaults are applied by Validate when a topic is set.
 func GetDefaultConfig() *Config {
 	return &Config{
 		Interval: 30 * time.Second,
@@ -41,10 +42,6 @@ func GetDefaultConfig() *Config {
 			Enabled: false,
 			Bind:    "127.0.0.1",
 			Port:    7401,
-		},
-		Notifications: ConfigNotifications{
-			Server:  DefaultNtfyServer,
-			Timeout: defaultNtfyTimeout,
 		},
 		Dev: defaultDevConfig,
 	}
