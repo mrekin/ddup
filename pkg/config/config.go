@@ -29,8 +29,8 @@ const DefaultNtfyServer = "https://ntfy.sh"
 
 const defaultNtfyTimeout = 10 * time.Second
 
-// ntfy topics may contain letters, numbers, underscores and dashes, up to 64 characters
-var ntfyTopicPattern = regexp.MustCompile("^[-_A-Za-z0-9]{1,64}$")
+// ntfy topics may contain letters, numbers, underscores and dashes, up to 128 characters
+var ntfyTopicPattern = regexp.MustCompile("^[-_A-Za-z0-9]{1,128}$")
 
 // Config represents the application configuration
 type Config struct {
@@ -409,7 +409,7 @@ func (c *Config) Validate(logger *slog.Logger) error {
 	c.Notifications.Topic = strings.TrimSpace(c.Notifications.Topic)
 	if c.Notifications.IsEnabled() {
 		if !ntfyTopicPattern.MatchString(c.Notifications.Topic) {
-			return errors.New("notifications.topic is invalid: it may contain only letters, numbers, underscores and dashes, up to 64 characters")
+			return errors.New("notifications.topic is invalid: it may contain only letters, numbers, underscores and dashes, up to 128 characters")
 		}
 		if c.Notifications.Server == "" {
 			c.Notifications.Server = DefaultNtfyServer
