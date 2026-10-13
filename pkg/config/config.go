@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +23,14 @@ const (
 	// RecordTypeCNAME manages a CNAME record; the endpoints' `ip` field holds the target hostname
 	RecordTypeCNAME = "CNAME"
 )
+
+// DefaultNtfyServer is the ntfy server used when notifications are enabled and no server is configured
+const DefaultNtfyServer = "https://ntfy.sh"
+
+const defaultNtfyTimeout = 10 * time.Second
+
+// ntfy topics may contain letters, numbers, underscores and dashes, up to 64 characters
+var ntfyTopicPattern = regexp.MustCompile("^[-_A-Za-z0-9]{1,64}$")
 
 // Config represents the application configuration
 type Config struct {
@@ -39,6 +49,9 @@ type Config struct {
 
 	// Server contains configuration for the server
 	Server ConfigServer `yaml:"server"`
+
+	// Notifications contains configuration for push notifications
+	Notifications ConfigNotifications `yaml:"notifications"`
 
 	// Dev is meant for development only; it's undocumented
 	Dev ConfigDev `yaml:"-"`
@@ -229,6 +242,30 @@ func (c ConfigServer) GetBasePath() string {
 	return "/" + p
 }
 
+// ConfigNotifications configures ntfy push notifications for health check and DNS events
+type ConfigNotifications struct {
+	// URL of the ntfy server
+	// +default "https://ntfy.sh"
+	Server string `yaml:"server"`
+
+	// ntfy topic to publish notifications to
+	// Notifications are disabled when empty
+	// On a public ntfy server the topic name acts as a password, so pick a hard-to-guess one
+	Topic string `yaml:"topic"`
+
+	// Optional ntfy access token (tk_...), sent as a Bearer token to publish to protected topics
+	Token string `yaml:"token"`
+
+	// Timeout for publishing each notification
+	// +default 10s
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// IsEnabled returns true if notifications are configured
+func (c ConfigNotifications) IsEnabled() bool {
+	return strings.TrimSpace(c.Topic) != ""
+}
+
 // ConfigDev includes options using during development only
 type ConfigDev struct {
 	// If true, enables CORS from anywhere
@@ -366,6 +403,27 @@ func (c *Config) Validate(logger *slog.Logger) error {
 				v.Name = v.URL
 			}
 		}
+	}
+
+	// Validate the notifications settings
+	c.Notifications.Topic = strings.TrimSpace(c.Notifications.Topic)
+	if c.Notifications.IsEnabled() {
+		if !ntfyTopicPattern.MatchString(c.Notifications.Topic) {
+			return errors.New("notifications.topic is invalid: it may contain only letters, numbers, underscores and dashes, up to 64 characters")
+		}
+		if c.Notifications.Server == "" {
+			c.Notifications.Server = DefaultNtfyServer
+		}
+		serverURL, err := url.Parse(c.Notifications.Server)
+		if err != nil || (serverURL.Scheme != "http" && serverURL.Scheme != "https") || serverURL.Host == "" {
+			return fmt.Errorf("notifications.server is invalid: it must be a valid http(s) URL, got '%s'", c.Notifications.Server)
+		}
+		c.Notifications.Server = strings.TrimRight(c.Notifications.Server, "/")
+		if c.Notifications.Timeout <= 0 {
+			c.Notifications.Timeout = defaultNtfyTimeout
+		}
+	} else if c.Notifications.Server != "" || c.Notifications.Token != "" || c.Notifications.Timeout > 0 {
+		return errors.New("notifications.topic is required when any other notifications option is set")
 	}
 
 	return nil

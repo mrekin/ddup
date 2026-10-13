@@ -27,6 +27,9 @@ type domainChecker struct {
 	lastUpdated time.Time
 	lastError   string
 
+	// dnsDirty is true while a DNS update failed and must be retried on the next cycle
+	dnsDirty bool
+
 	// Consecutive successful checks for endpoints that were removed and are recovering
 	recovering map[string]int
 
@@ -60,14 +63,27 @@ func (dc *domainChecker) setState(healthyIPs []string, dnsValues []string, faile
 	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
 	dc.lastError = ""
+	dc.dnsDirty = false
 }
 
-func (dc *domainChecker) setError(err string) {
+// setStateFailed records a cycle whose DNS update failed: the endpoint state is refreshed, while the DNS values are unchanged and the update is retried on the next cycle
+func (dc *domainChecker) setStateFailed(healthyIPs []string, failedIPs map[string]int, updateErr error) {
 	dc.lock.Lock()
 	defer dc.lock.Unlock()
 
+	dc.healthyIPs = healthyIPs
+	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
-	dc.lastError = err
+	dc.lastError = "Error updating DNS records: " + updateErr.Error()
+	dc.dnsDirty = true
+}
+
+// isDNSDirty returns true if a DNS update failed and must be retried
+func (dc *domainChecker) isDNSDirty() bool {
+	dc.lock.Lock()
+	defer dc.lock.Unlock()
+
+	return dc.dnsDirty
 }
 
 // getRecovering returns a copy of the recovery counters

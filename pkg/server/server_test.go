@@ -17,6 +17,7 @@ import (
 
 	"github.com/italypaleale/ddup/pkg/config"
 	"github.com/italypaleale/ddup/pkg/healthcheck"
+	"github.com/italypaleale/ddup/pkg/notify"
 )
 
 type fakeProvider struct {
@@ -286,6 +287,145 @@ func TestServerBasePath(t *testing.T) {
 		srv.handler.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Result().StatusCode)
+	})
+}
+
+// fakeStatusReporter is a notify.Service that returns static notification data for testing
+type fakeStatusReporter struct {
+	status    notify.Status
+	attempted bool
+	digests   []string
+}
+
+func (f *fakeStatusReporter) NotificationStatus() (notify.Status, bool) {
+	return f.status, f.attempted
+}
+
+func (f *fakeStatusReporter) SendDigest(_ context.Context, digest string) {
+	f.digests = append(f.digests, digest)
+}
+
+func TestNotificationsEndpoint(t *testing.T) {
+	do := func(t *testing.T, opts NewServerOpts) *httptest.ResponseRecorder {
+		t.Helper()
+		s, err := NewServer(opts)
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/notifications", nil))
+		return rec
+	}
+
+	t.Run("disabled by default", func(t *testing.T) {
+		rec := do(t, NewServerOpts{HealthChecker: &fakeProvider{}})
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, `{"enabled": false}`, rec.Body.String())
+	})
+
+	t.Run("enabled without attempts", func(t *testing.T) {
+		rec := do(t, NewServerOpts{HealthChecker: &fakeProvider{}, Notifications: &fakeStatusReporter{}})
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, `{"enabled": true}`, rec.Body.String())
+	})
+
+	t.Run("reports the last successful attempt", func(t *testing.T) {
+		now := time.Now()
+		rec := do(t, NewServerOpts{
+			HealthChecker: &fakeProvider{},
+			Notifications: &fakeStatusReporter{
+				attempted: true,
+				status:    notify.Status{OK: true, LastAttempt: now, LastSuccess: now},
+			},
+		})
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var res NotificationsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+		assert.True(t, res.Enabled)
+		require.NotNil(t, res.OK)
+		assert.True(t, *res.OK)
+		assert.WithinDuration(t, now, *res.LastAttempt, time.Second)
+		assert.WithinDuration(t, now, *res.LastSuccess, time.Second)
+		assert.Empty(t, res.LastError)
+	})
+
+	t.Run("reports the last failed attempt", func(t *testing.T) {
+		rec := do(t, NewServerOpts{
+			HealthChecker: &fakeProvider{},
+			Notifications: &fakeStatusReporter{
+				attempted: true,
+				status:    notify.Status{OK: false, LastAttempt: time.Now(), LastError: "HTTP 403"},
+			},
+		})
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var res NotificationsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+		assert.True(t, res.Enabled)
+		require.NotNil(t, res.OK)
+		assert.False(t, *res.OK)
+		assert.Nil(t, res.LastSuccess, "lastSuccess is omitted until the first successful delivery")
+		assert.Equal(t, "HTTP 403", res.LastError)
+	})
+}
+
+func TestNotificationsTestEndpoint(t *testing.T) {
+	newServer := func(t *testing.T, reporter notify.Service) *Server {
+		t.Helper()
+		s, err := NewServer(NewServerOpts{HealthChecker: &fakeProvider{}, Notifications: reporter})
+		require.NoError(t, err)
+		return s
+	}
+
+	post := func(t *testing.T, s *Server, headers map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/notifications/test", nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		s.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("requires the header", func(t *testing.T) {
+		reporter := &fakeStatusReporter{}
+		s := newServer(t, reporter)
+
+		rec := post(t, s, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Empty(t, reporter.digests, "no notification is sent without the header")
+	})
+
+	t.Run("conflict when notifications are disabled", func(t *testing.T) {
+		s := newServer(t, nil)
+
+		rec := post(t, s, map[string]string{headerRequestedBy: requestedByValue})
+		assert.Equal(t, http.StatusConflict, rec.Code)
+		assert.Contains(t, rec.Body.String(), "api_notifications_disabled")
+	})
+
+	t.Run("sends the current status digest", func(t *testing.T) {
+		reporter := &fakeStatusReporter{}
+		s := newServer(t, reporter)
+
+		rec := post(t, s, map[string]string{headerRequestedBy: requestedByValue})
+		assert.Equal(t, http.StatusAccepted, rec.Code)
+
+		require.Len(t, reporter.digests, 1)
+		// The fakeProvider reports the domain "a.example.com" with no endpoints
+		assert.Equal(t, "a.example.com: unhealthy, 0/0 endpoints up", reporter.digests[0])
+	})
+
+	t.Run("GET does not send", func(t *testing.T) {
+		reporter := &fakeStatusReporter{}
+		s := newServer(t, reporter)
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/notifications/test", nil)
+		req.Header.Set(headerRequestedBy, requestedByValue)
+		rec := httptest.NewRecorder()
+		s.handler.ServeHTTP(rec, req)
+		assert.NotEqual(t, http.StatusAccepted, rec.Code)
+		assert.Empty(t, reporter.digests)
 	})
 }
 

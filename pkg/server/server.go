@@ -18,6 +18,7 @@ import (
 
 	"github.com/italypaleale/ddup/pkg/config"
 	"github.com/italypaleale/ddup/pkg/healthcheck"
+	"github.com/italypaleale/ddup/pkg/notify"
 )
 
 const (
@@ -35,6 +36,8 @@ const (
 // Server is the server based on Gin
 type Server struct {
 	hc healthcheck.StatusProvider
+	// Optional source of the notification delivery status; nil when notifications are disabled
+	notifications notify.Service
 
 	appSrv  *http.Server
 	handler http.Handler
@@ -49,12 +52,15 @@ type Server struct {
 // NewServerOpts contains options for the NewServer method
 type NewServerOpts struct {
 	HealthChecker healthcheck.StatusProvider
+	// Notifications is optional; when nil, the notifications API reports notifications as disabled
+	Notifications notify.Service
 }
 
 // NewServer creates a new Server object and initializes it
 func NewServer(opts NewServerOpts) (*Server, error) {
 	s := &Server{
-		hc: opts.HealthChecker,
+		hc:            opts.HealthChecker,
+		notifications: opts.Notifications,
 	}
 
 	// Init the object
@@ -111,6 +117,37 @@ func (s *Server) initAppServer() (err error) {
 	// Aggregated status with the same information rendered by the dashboard
 	mux.HandleFunc("GET /api/summary", func(w http.ResponseWriter, r *http.Request) {
 		respondWithJSON(r.Context(), w, getStatusSummary(s.hc.GetAllDomainsStatus()))
+	})
+
+	// Delivery status of push notifications; never includes the destination server or topic
+	mux.HandleFunc("GET /api/notifications", func(w http.ResponseWriter, r *http.Request) {
+		res := NotificationsResponse{Enabled: s.notifications != nil}
+		if s.notifications != nil {
+			if status, attempted := s.notifications.NotificationStatus(); attempted {
+				res.OK = &status.OK
+				res.LastAttempt = &status.LastAttempt
+				if !status.LastSuccess.IsZero() {
+					res.LastSuccess = &status.LastSuccess
+				}
+				res.LastError = status.LastError
+			}
+		}
+		respondWithJSON(r.Context(), w, res)
+	})
+
+	// Sends a notification with the current status of all domains; the delivery is asynchronous
+	mux.HandleFunc("POST /api/notifications/test", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(headerRequestedBy) != requestedByValue {
+			errNotificationsForbidden.WriteResponse(r.Context(), w)
+			return
+		}
+		if s.notifications == nil {
+			errNotificationsDisabled.WriteResponse(r.Context(), w)
+			return
+		}
+
+		s.notifications.SendDigest(r.Context(), buildStatusDigest(getStatusSummary(s.hc.GetAllDomainsStatus())))
+		w.WriteHeader(http.StatusAccepted)
 	})
 
 	mux.HandleFunc("POST /api/check", func(w http.ResponseWriter, r *http.Request) {

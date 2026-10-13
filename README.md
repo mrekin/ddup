@@ -4,7 +4,7 @@
 
 # ddup - Dynamic DNS Health Checker
 
-> **Fork note:** this is a fork of [ItalyPaleAle/ddup](https://github.com/ItalyPaleAle/ddup) with the following additions on top of upstream: CNAME record support (`recordType: CNAME`, Cloudflare provider only), a `server.basePath` option to serve the dashboard and API under a sub-path, a `GET /api/summary` endpoint returning the aggregated status of all domains as JSON, and fixes for the dashboard/API (status of all endpoints is shown, `host` option works correctly with multiple domains).
+> **Fork note:** this is a fork of [ItalyPaleAle/ddup](https://github.com/ItalyPaleAle/ddup) with the following additions on top of upstream: CNAME record support (`recordType: CNAME`, Cloudflare provider only), a `server.basePath` option to serve the dashboard and API under a sub-path, a `GET /api/summary` endpoint returning the aggregated status of all domains as JSON, ntfy push notifications when endpoints go down or recover and when DNS records change, and fixes for the dashboard/API (status of all endpoints is shown, `host` option works correctly with multiple domains).
 
 ddup periodically checks the health of your services and updates the DNS records pointing to healthy deployments.
 
@@ -245,6 +245,27 @@ providers:
 - `port`: Port to listen on (defaults to `7401`)
 - `basePath`: Base path under which the web dashboard and the API are served. For example, with `basePath: "ddup"`, the dashboard is available at `/ddup/` and the API at `/ddup/api/...`. Leading and trailing slashes are optional. When empty (default), everything is served from the root `/`.
 
+### Notifications Settings
+
+ddup can send push notifications to an [ntfy](https://ntfy.sh) server when an endpoint goes down or recovers, and when DNS records are updated or an update fails:
+
+```yaml
+notifications:
+  # ntfy server (defaults to https://ntfy.sh)
+  # server: "https://ntfy.sh"
+  # Topic to publish notifications to; required to enable notifications
+  topic: "ddup-notifications-2f8a1c"
+  # Optional ntfy access token (tk_...) to publish to a protected topic
+  # token: "tk_xxxxxxxxxxxxxxxxxxxx"
+  # Timeout for publishing each notification (defaults to 10s)
+  # timeout: "10s"
+```
+
+- Notifications are disabled unless `topic` is set
+- Notification sends are asynchronous and never slow down or block health checks; the dashboard shows whether the last delivery succeeded
+- Endpoints are reported as down only after `attempts` consecutive failures, and as recovered only when they are added back to the DNS rotation (after `recoverAfter`, if configured)
+- On a public server such as `ntfy.sh`, the topic name acts as a password: pick a hard-to-guess one. To verify it works: `curl -d "test" https://ntfy.sh/<your-topic>`
+
 ### Web Dashboard and API
 
 When the server is enabled, ddup serves a web dashboard with the status of all domains, plus a JSON API returning the same information:
@@ -252,6 +273,8 @@ When the server is enabled, ddup serves a web dashboard with the status of all d
 - `GET /api/status`: Raw status of all domains, as a map keyed by record name
 - `GET /api/status/{recordName}`: Status of a single domain
 - `GET /api/summary`: Aggregated status with the same information rendered by the dashboard: overall status of each domain (`healthy`, `warning`, or `unhealthy`), count of healthy endpoints, and summary counters
+- `GET /api/notifications`: Delivery status of push notifications (`{"enabled": false}` when not configured; otherwise `ok`, `lastAttempt`, `lastSuccess`, and a generic `lastError` after the first attempt). The destination server and topic are never exposed; the dashboard uses this to show whether notifications are being delivered
+- `POST /api/notifications/test`: sends a notification with the current status of all domains (the dashboard's "Test notification" button). Requires the `X-Requested-By: ddup-dashboard` header; returns 202 when the notification was queued for delivery (asynchronously), 409 when notifications are not configured
 
 Example response of `GET /api/summary`:
 

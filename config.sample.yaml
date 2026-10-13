@@ -60,6 +60,21 @@ providers:
       apiToken: "your-cloudflare-api-token"
       zoneId: "your-zone-id"
 
+# Push notifications (optional)
+# Sends a notification to an ntfy server (like https://ntfy.sh) when endpoints go down or
+# recover, and when DNS records are updated or an update fails.
+# Disabled unless a topic is set. On a public server the topic name acts as a password:
+# pick a hard-to-guess one. To test it: curl -d "test" https://ntfy.sh/<your-topic>
+notifications:
+  # ntfy server (defaults to https://ntfy.sh)
+  # server: "https://ntfy.sh"
+  # Topic to publish notifications to; required to enable notifications
+  topic: "ddup-notifications-2f8a1c"
+  # Optional ntfy access token (tk_...) to publish to a protected topic
+  # token: "tk_xxxxxxxxxxxxxxxxxxxx"
+  # Timeout for publishing each notification (defaults to 10s)
+  # timeout: "10s"
+
 # Enable the web server
 server:
   enabled: true

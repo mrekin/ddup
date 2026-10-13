@@ -17,6 +17,7 @@ import (
 	"github.com/italypaleale/ddup/pkg/dns"
 	"github.com/italypaleale/ddup/pkg/healthcheck"
 	appmetrics "github.com/italypaleale/ddup/pkg/metrics"
+	"github.com/italypaleale/ddup/pkg/notify"
 	"github.com/italypaleale/ddup/pkg/server"
 )
 
@@ -104,8 +105,19 @@ func main() {
 
 	// Initialize health checker
 	// If there's a non-nil statusProvider, it means we're in the "dashboarddev" mode where we use static data
+	var notifier notify.Notifier
 	if statusProvider == nil {
-		hc, err := healthcheck.NewHealthChecker(dnsProviders, metrics)
+		// Initialize notifications, if configured
+		if cfg.Notifications.IsEnabled() {
+			notifier, err = notify.NewNtfyNotifier(&cfg.Notifications)
+			if err != nil {
+				shutdowns.Run(log)
+				slogkit.FatalError(log, "Failed to init notifications", err)
+				return
+			}
+		}
+
+		hc, err := healthcheck.NewHealthChecker(dnsProviders, metrics, notifier)
 		if err != nil {
 			shutdowns.Run(log)
 			slogkit.FatalError(log, "Failed to init health checker", err)
@@ -120,6 +132,7 @@ func main() {
 	if cfg.Server.Enabled {
 		srv, err := server.NewServer(server.NewServerOpts{
 			HealthChecker: statusProvider,
+			Notifications: serviceOrNil(notifier),
 		})
 		if err != nil {
 			shutdowns.Run(log)
@@ -146,6 +159,12 @@ func main() {
 
 type shutdownManager struct {
 	fns []servicerunner.Service
+}
+
+// serviceOrNil returns the notifier as a notifications Service, or nil when the notifier is not a Service (including when it's nil)
+func serviceOrNil(notifier notify.Notifier) notify.Service {
+	service, _ := notifier.(notify.Service)
+	return service
 }
 
 func (s *shutdownManager) Add(fn servicerunner.Service) {

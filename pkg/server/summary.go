@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/italypaleale/ddup/pkg/healthcheck"
@@ -39,6 +41,32 @@ type SummaryDomain struct {
 	EndpointsHealthy int                                `json:"endpointsHealthy"`
 	EndpointsTotal   int                                `json:"endpointsTotal"`
 	Endpoints        []healthcheck.DomainStatusEndpoint `json:"endpoints"`
+}
+
+// NotificationsResponse is the delivery status of push notifications, as displayed in the dashboard's header
+// It never contains the destination server or topic
+type NotificationsResponse struct {
+	// Enabled is true when notifications are configured
+	Enabled bool `json:"enabled"`
+	// OK is true if the most recent delivery attempt succeeded; the delivery fields are only set after the first attempt
+	OK          *bool      `json:"ok,omitempty"`
+	LastAttempt *time.Time `json:"lastAttempt,omitempty"`
+	LastSuccess *time.Time `json:"lastSuccess,omitempty"`
+	// LastError is a generic failure description, such as "HTTP 403"
+	LastError string `json:"lastError,omitempty"`
+}
+
+// buildStatusDigest renders a plain-text summary of all domains, sent as a manually-triggered notification
+func buildStatusDigest(summary StatusSummary) string {
+	if len(summary.Domains) == 0 {
+		return "No domains are configured"
+	}
+
+	var b strings.Builder
+	for _, d := range summary.Domains {
+		fmt.Fprintf(&b, "%s: %s, %d/%d endpoints up\n", d.Name, d.Status, d.EndpointsHealthy, d.EndpointsTotal)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // getStatusSummary computes the StatusSummary from the raw status of all domains

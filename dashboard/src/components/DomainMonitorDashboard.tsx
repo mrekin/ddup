@@ -7,6 +7,8 @@ import {
   RefreshCw,
   Activity,
   AlertTriangle,
+  BellOff,
+  BellRing,
   CheckCircle,
   XCircle,
   Clock,
@@ -40,6 +42,16 @@ type DomainsResponse = Record<string, DomainStatus>
 type Domain = {
   name: string
   status: DomainStatus
+}
+
+// Delivery status of push notifications, from GET /api/notifications
+// The backend never exposes the destination server or topic here
+interface NotificationsStatus {
+  enabled: boolean
+  ok?: boolean
+  lastAttempt?: string
+  lastSuccess?: string
+  lastError?: string
 }
 
 // One segment of the summary bar: the count of domains with a health status
@@ -78,6 +90,9 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [isChecking, setIsChecking] = useState(false)
+  const [notifications, setNotifications] = useState<NotificationsStatus | null>(null)
+  const [isSendingNotification, setIsSendingNotification] = useState(false)
+  const [notificationSent, setNotificationSent] = useState(false)
 
   const fetchDomains = useCallback(async (): Promise<void> => {
     setIsLoading(true)
@@ -106,6 +121,22 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
       setDomains([])
     } finally {
       setIsLoading(false)
+    }
+  }, [endpoint])
+
+  // Fetches the notification delivery status; failures are tolerated, since the indicator is optional
+  const fetchNotifications = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    try {
+      const response = await fetch(endpoint + '/api/notifications', { signal })
+      if (!response.ok) {
+        // Older backends don't have this endpoint: hide the indicator
+        setNotifications(null)
+        return
+      }
+      const data: NotificationsStatus = await response.json()
+      setNotifications(data.enabled ? data : null)
+    } catch {
+      // Keep showing the last known status on network errors
     }
   }, [endpoint])
 
@@ -154,11 +185,13 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
     // Defer the initial fetch so the effect body itself does not call setState synchronously.
     queueMicrotask(() => {
       void runFetch()
+      void fetchNotifications(controller.signal)
     })
 
     const interval = setInterval(() => {
       if (autoRefresh) {
         void runFetch()
+        void fetchNotifications(controller.signal)
       }
     }, 60000)
 
@@ -166,10 +199,11 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
       controller.abort()
       clearInterval(interval)
     }
-  }, [autoRefresh, endpoint])
+  }, [autoRefresh, endpoint, fetchNotifications])
 
   const refreshClicked = async () => {
     await fetchDomains()
+    void fetchNotifications()
   }
 
   // Asks the server to run health checks right now (instead of waiting for the next interval), then shows the result
@@ -190,12 +224,42 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
       const data: DomainsResponse = await response.json()
       setDomains(Object.entries(data).map(([name, status]) => ({ name, status })))
       setLastUpdated(new Date())
+      // A check may have triggered DNS updates and notification attempts
+      void fetchNotifications()
     } catch (err) {
       console.error('Failed to run check:', err)
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred'
       setError(`Failed to run check: ${errorMessage}`)
     } finally {
       setIsChecking(false)
+    }
+  }
+
+  // Asks the server to send a notification with the current status of all domains
+  const testNotificationClicked = async (): Promise<void> => {
+    setIsSendingNotification(true)
+    setError(null)
+    setNotificationSent(false)
+    try {
+      const response = await fetch(endpoint + '/api/notifications/test', {
+        method: 'POST',
+        // The server requires this header, which blocks cross-site requests
+        headers: { 'X-Requested-By': 'ddup-dashboard' },
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status} ${response.statusText}`)
+      }
+
+      // The delivery is asynchronous: the status chip updates on the next poll
+      setNotificationSent(true)
+      void fetchNotifications()
+      setTimeout(() => setNotificationSent(false), 4000)
+    } catch (err) {
+      console.error('Failed to send test notification:', err)
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred'
+      setError(`Failed to send test notification: ${errorMessage}`)
+    } finally {
+      setIsSendingNotification(false)
     }
   }
 
@@ -265,6 +329,26 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
               </div>
             )}
 
+            {/* Delivery status of push notifications; hidden until the backend reports at least one attempt */}
+            {notifications && typeof notifications.ok === 'boolean' && (
+              <div
+                className={cn(
+                  'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium',
+                  notifications.ok
+                    ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/50 dark:text-green-300'
+                    : 'border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300'
+                )}
+                title={
+                  notifications.ok
+                    ? `Notifications are being delivered${notifications.lastSuccess ? `: last sent ${new Date(notifications.lastSuccess).toLocaleTimeString()}` : ''}`
+                    : `Notifications are not being delivered${notifications.lastError ? `: ${notifications.lastError}` : ''}${notifications.lastAttempt ? ` (at ${new Date(notifications.lastAttempt).toLocaleTimeString()})` : ''}`
+                }
+              >
+                {notifications.ok ? <BellRing className="h-3.5 w-3.5" /> : <BellOff className="h-3.5 w-3.5" />}
+                {notifications.ok ? 'Notifications' : 'Notifications unavailable'}
+              </div>
+            )}
+
             <div className="flex gap-2">
               {/* Split button: the main part toggles auto-refresh, the chevron opens a menu to refresh right away */}
               <div className="flex">
@@ -312,6 +396,21 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
                 <Play className={cn('h-4 w-4', isChecking && 'animate-pulse')} />
                 {isChecking ? 'Checking…' : 'Check now'}
               </Button>
+
+              {/* Only shown when notifications are configured (the backend reports them as enabled) */}
+              {notifications && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={testNotificationClicked}
+                  disabled={isSendingNotification || isLoading}
+                  title="Send a notification with the current status of all domains"
+                  className="flex items-center gap-2"
+                >
+                  <BellRing className={cn('h-4 w-4', isSendingNotification && 'animate-pulse')} />
+                  {isSendingNotification ? 'Sending…' : notificationSent ? 'Sent ✓' : 'Test notification'}
+                </Button>
+              )}
             </div>
           </div>
         </div>
