@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -479,6 +481,12 @@ func TestCheckEndpoint_ExpectStatusAndMethod(t *testing.T) {
 
 func TestClientForHost_ConcurrentAndCached(t *testing.T) {
 	c := New("test.example.com", nil, config.ConfigHealthChecks{}, nil)
+	baseTransport, ok := c.client.Transport.(*http.Transport)
+	require.True(t, ok)
+	baseServerName := ""
+	if baseTransport.TLSClientConfig != nil {
+		baseServerName = baseTransport.TLSClientConfig.ServerName
+	}
 
 	var wg sync.WaitGroup
 	clients := make([]*http.Client, 20)
@@ -492,10 +500,133 @@ func TestClientForHost_ConcurrentAndCached(t *testing.T) {
 	for _, cl := range clients {
 		assert.Same(t, clients[0], cl, "clients should be cached per host")
 	}
-	assert.Nil(t, c.client.Transport, "base client must not be modified")
+	assert.Same(t, baseTransport, c.client.Transport, "base client must not be replaced")
+	if baseTransport.TLSClientConfig != nil {
+		assert.Equal(t, baseServerName, baseTransport.TLSClientConfig.ServerName, "base client must not be modified")
+	}
 
 	tr, ok := clients[0].Transport.(*http.Transport)
 	require.True(t, ok)
+	assert.NotSame(t, baseTransport, tr)
 	assert.Equal(t, "app.example.com", tr.TLSClientConfig.ServerName)
 	assert.NotSame(t, clients[0], c.clientForHost("other.example.com"))
+}
+
+func TestCheckEndpoint_NewConnectionEveryCheck(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c := New("test.example.com", nil, config.ConfigHealthChecks{}, nil)
+	endpoint := &config.ConfigEndpoint{
+		URL: srv.URL,
+		IP: "1.1.1.1",
+	}
+
+	// A reused connection would keep talking to the same address forever, even after DNS changes
+	for range 3 {
+		result := c.checkEndpoint(t.Context(), endpoint)
+		require.True(t, result.Healthy)
+	}
+	assert.Equal(t, int32(3), conns.Load(), "each check opens its own connection")
+
+	// Clients for endpoints with a custom host are built from the same transport
+	transport, ok := c.clientForHost("custom.example.com").Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.True(t, transport.DisableKeepAlives)
+}
+
+func TestNew(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		c := New("example.com", nil, config.ConfigHealthChecks{}, nil)
+		assert.Equal(t, "example.com", c.GetDomain())
+		assert.Equal(t, DefaultAttempts, c.GetMaxAttempts())
+		assert.Equal(t, DefaultTimeout, c.cfg.Timeout)
+		assert.Equal(t, 1, c.GetRecoverAfter())
+	})
+
+	t.Run("negative values use the defaults", func(t *testing.T) {
+		c := New("example.com", nil, config.ConfigHealthChecks{Timeout: -time.Second, Attempts: -1, RecoverAfter: -1}, nil)
+		assert.Equal(t, DefaultAttempts, c.GetMaxAttempts())
+		assert.Equal(t, DefaultTimeout, c.cfg.Timeout)
+		assert.Equal(t, 1, c.GetRecoverAfter())
+	})
+
+	t.Run("configured values", func(t *testing.T) {
+		c := New("example.com", nil, config.ConfigHealthChecks{Timeout: 5 * time.Second, Attempts: 4, RecoverAfter: 3}, nil)
+		assert.Equal(t, 4, c.GetMaxAttempts())
+		assert.Equal(t, 5*time.Second, c.cfg.Timeout)
+		assert.Equal(t, 3, c.GetRecoverAfter())
+	})
+}
+
+func TestCheckAll(t *testing.T) {
+	t.Run("checks all endpoints concurrently", func(t *testing.T) {
+		const numEndpoints = 3
+		arrived := make(chan struct{}, numEndpoints)
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			arrived <- struct{}{}
+
+			// Hold every request until all of them arrived, which only happens if they are made concurrently
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+
+			if r.URL.Path == "/fail" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		ctx := t.Context()
+		go func() {
+			for range numEndpoints {
+				select {
+				case <-arrived:
+				case <-ctx.Done():
+					return
+				}
+			}
+			close(release)
+		}()
+
+		endpoints := []*config.ConfigEndpoint{
+			{Name: "ok1", URL: srv.URL + "/ok", IP: "192.0.2.1"},
+			{Name: "fail", URL: srv.URL + "/fail", IP: "192.0.2.2"},
+			{Name: "ok2", URL: srv.URL + "/ok", IP: "192.0.2.3"},
+		}
+		c := New("example.com", endpoints, config.ConfigHealthChecks{Timeout: 2 * time.Second}, nil)
+
+		results := c.CheckAll(t.Context())
+		require.Len(t, results, numEndpoints)
+
+		// Results are in the same order as the endpoints
+		for i, res := range results {
+			assert.Same(t, endpoints[i], res.Endpoint)
+		}
+		assert.True(t, results[0].Healthy)
+		require.NoError(t, results[0].Error)
+		assert.False(t, results[1].Healthy)
+		require.ErrorContains(t, results[1].Error, "status code 503")
+		assert.True(t, results[2].Healthy)
+		require.NoError(t, results[2].Error)
+	})
+
+	t.Run("no endpoints", func(t *testing.T) {
+		c := New("example.com", nil, config.ConfigHealthChecks{}, nil)
+		assert.Empty(t, c.CheckAll(t.Context()))
+	})
 }

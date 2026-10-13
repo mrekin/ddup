@@ -16,12 +16,12 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
       CGO_ENABLED: "0"
-      GOLANGCI_LINT_VERSION: "v2.14.0"
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,7 +32,7 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Setup Node.js and pnpm
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
         with:
           cache: true
           package-json-file: 'dashboard/package.json'
@@ -45,14 +45,54 @@ jobs:
       - name: Build dashboard
         working-directory: dashboard
         run: |
-          pnpm install
+          pnpm install --frozen-lockfile
           pnpm build
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          version-file: '.golangci-lint-version'
 
-      - name: Test
+      - name: Test with race detector
         run: |
-          make test
+          make test-race
+
+  dashboard-e2e:
+    name: Dashboard E2E tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js and pnpm
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
+        with:
+          cache: true
+          package-json-file: 'dashboard/package.json'
+          cache-dependency-path: 'dashboard/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: |
+          pnpm install --frozen-lockfile
+
+      - name: Install Playwright browser
+        working-directory: dashboard
+        run: |
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        working-directory: dashboard
+        run: |
+          pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: dashboard/playwright-report
+          retention-days: 7

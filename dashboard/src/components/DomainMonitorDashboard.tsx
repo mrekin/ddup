@@ -13,8 +13,12 @@ import {
   Search,
   Play,
   ChevronDown,
+  type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { setFavicon } from '@/lib/favicon'
+import type { OverallStatus } from '@/lib/favicon-shapes'
+import { StatusIcon } from '@/components/StatusIcon'
 
 interface DomainStatusEndpoint {
   healthy: boolean
@@ -37,6 +41,34 @@ type Domain = {
   name: string
   status: DomainStatus
 }
+
+// One segment of the summary bar: the count of domains with a health status
+// The label is only shown from the sm breakpoint up, and stays available to screen readers
+const SummarySegment = ({
+  icon: Icon,
+  label,
+  title,
+  count,
+  className,
+}: {
+  icon: LucideIcon
+  label: string
+  title: string
+  count: number
+  className: string
+}) => (
+  <div
+    title={title}
+    className={cn(
+      'flex items-center justify-center gap-1.5 px-1 py-1.5 sm:gap-2.5 sm:p-2.5 lg:gap-3 lg:p-3.5',
+      className
+    )}
+  >
+    <Icon className="h-4 w-4 shrink-0 sm:h-5 sm:w-5 lg:h-6 lg:w-6" aria-hidden="true" />
+    <span className="text-base leading-none font-bold sm:text-2xl lg:text-3xl">{count}</span>
+    <span className="sr-only text-[13px] font-medium text-muted-foreground sm:not-sr-only lg:text-sm">{label}</span>
+  </div>
+)
 
 const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
   const [domains, setDomains] = useState<Domain[]>([])
@@ -194,6 +226,23 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
     return domainMatches || endpointMatches
   })
 
+  // The icon of the tab shows the worst status of all the domains (not only the ones matching the search)
+  const overallCounts = {
+    warning: domains.filter((d) => getDomainStatus(d) === 'warning').length,
+    unhealthy: domains.filter((d) => getDomainStatus(d) === 'unhealthy').length,
+  }
+  let overallStatus: OverallStatus = 'unknown'
+  if (error || overallCounts.unhealthy > 0) {
+    overallStatus = 'unhealthy'
+  } else if (overallCounts.warning > 0) {
+    overallStatus = 'warning'
+  } else if (domains.length > 0) {
+    overallStatus = 'healthy'
+  }
+  useEffect(() => {
+    setFavicon(overallStatus)
+  }, [overallStatus])
+
   const healthyDomains = filteredDomains.filter((d) => getDomainStatus(d) === 'healthy').length
   const warningDomains = filteredDomains.filter((d) => getDomainStatus(d) === 'warning').length
   const unhealthyDomains = filteredDomains.filter((d) => getDomainStatus(d) === 'unhealthy').length
@@ -203,7 +252,8 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
       <div className="mx-auto max-w-7xl space-y-6">
         {/* Header */}
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
+          <div className="flex items-center gap-3">
+            <StatusIcon status={overallStatus} className="h-8 w-8 shrink-0" />
             <h1 className="text-3xl font-bold tracking-tight">ddup</h1>
           </div>
 
@@ -266,8 +316,8 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="relative max-w-md">
+        {/* Search bar */}
+        <div className="relative w-full max-w-md">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
@@ -277,6 +327,33 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
             className="w-full rounded-md border border-input bg-background px-10 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           />
         </div>
+
+        {/* Summary of the domains: three equal segments in one bar */}
+        {!error && domains.length > 0 && (
+          <div className="grid grid-cols-3 divide-x overflow-hidden rounded-md border bg-card">
+            <SummarySegment
+              icon={CheckCircle}
+              label="Healthy"
+              title="Healthy domains"
+              count={healthyDomains}
+              className="text-green-600 dark:text-green-400"
+            />
+            <SummarySegment
+              icon={AlertTriangle}
+              label="Warning"
+              title="Domains with some unhealthy endpoints"
+              count={warningDomains}
+              className="text-yellow-600 dark:text-yellow-400"
+            />
+            <SummarySegment
+              icon={XCircle}
+              label="Unhealthy"
+              title="Unhealthy domains"
+              count={unhealthyDomains}
+              className="text-red-600 dark:text-red-400"
+            />
+          </div>
+        )}
 
         {/* Error Message */}
         {error && (
@@ -289,41 +366,6 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
               <p className="mt-2 text-sm text-red-700 dark:text-red-300">{error}</p>
             </CardContent>
           </Card>
-        )}
-
-        {/* Stats Overview */}
-        {!error && domains.length > 0 && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0">
-                <CardTitle className="text-sm font-medium">Healthy Domains</CardTitle>
-                <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-green-600 dark:text-green-400">{healthyDomains}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0">
-                <CardTitle className="text-sm font-medium">Warning Domains</CardTitle>
-                <AlertTriangle className="h-4 w-4 text-yellow-600 dark:text-yellow-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{warningDomains}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0">
-                <CardTitle className="text-sm font-medium">Unhealthy Domains</CardTitle>
-                <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-red-600 dark:text-red-400">{unhealthyDomains}</div>
-              </CardContent>
-            </Card>
-          </div>
         )}
 
         {/* Domain Cards */}

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/italypaleale/ddup/pkg/config"
 	"github.com/italypaleale/ddup/pkg/dns"
 	"github.com/italypaleale/ddup/pkg/healthcheck/checker"
 )
@@ -28,6 +29,9 @@ type domainChecker struct {
 
 	// Consecutive successful checks for endpoints that were removed and are recovering
 	recovering map[string]int
+
+	// Priority of each endpoint, by IP
+	priorities map[string]int
 }
 
 func (dc *domainChecker) getState() (healthyIPs []string, failedIPs map[string]int, dnsValues []string, lastUpdated time.Time, lastError string) {
@@ -35,6 +39,16 @@ func (dc *domainChecker) getState() (healthyIPs []string, failedIPs map[string]i
 	defer dc.lock.Unlock()
 
 	return dc.healthyIPs, dc.failedIPs, dc.dnsValues, dc.lastUpdated, dc.lastError
+}
+
+// publishedValues returns the values that would be written to the DNS record for a set of healthy endpoints:
+// the ones with the lowest priority, restricted to a single value for CNAME records
+func (dc *domainChecker) publishedValues(healthy []string) []string {
+	values := selectLowestPriority(dc.priorities, healthy)
+	if dc.recordType == config.RecordTypeCNAME && len(values) > 1 {
+		values = values[:1]
+	}
+	return values
 }
 
 func (dc *domainChecker) setState(healthyIPs []string, dnsValues []string, failedIPs map[string]int) {

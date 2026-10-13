@@ -10,11 +10,12 @@ import (
 	"slices"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
+
 	"github.com/italypaleale/ddup/pkg/config"
 	"github.com/italypaleale/ddup/pkg/dns"
 	"github.com/italypaleale/ddup/pkg/healthcheck/checker"
 	appmetrics "github.com/italypaleale/ddup/pkg/metrics"
-	"github.com/italypaleale/ddup/pkg/utils"
 )
 
 // HealthChecker manages health checking and DNS updates
@@ -50,6 +51,7 @@ func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.
 			checker:    checker.New(d.RecordName, d.Endpoints, d.HealthChecks, metrics),
 			ttl:        d.TTL,
 			recordType: d.RecordType,
+			priorities: endpointPriorities(d.Endpoints),
 			failedIPs:  make(map[string]int, 0),
 			recovering: make(map[string]int, 0),
 			provider:   provider,
@@ -127,7 +129,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 
 		// Get the list of currently healthy and failed IPs
 		// We clone the failed IPs map to prevent concurrent access
-		currentHealthyIPs, failedIPs, currentDNSValues, _, _ := dc.getState()
+		currentHealthyIPs, failedIPs, _, _, _ := dc.getState()
 		failedIPs = maps.Clone(failedIPs)
 
 		// Perform health checks for this domain
@@ -179,20 +181,15 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		}
 		dc.setRecovering(recovering)
 
-		// CNAME records hold a single value per name: only the first healthy endpoint (config order) is written to DNS,
-		// while all healthy endpoints are kept in the state and shown in the dashboard/API
-		dnsValues := newHealthyIPs
-		if dc.recordType == config.RecordTypeCNAME && len(dnsValues) > 1 {
-			skipped := dnsValues[1:]
-			dnsValues = dnsValues[:1]
-			domainLog.WarnContext(ctx, "Multiple healthy endpoints for CNAME record; only the first one is written to DNS",
-				"selected", dnsValues[0], "skipped", skipped)
-		}
+		// Only the healthy endpoints with the lowest priority value are published; CNAME records hold a single value per name
+		// The previous selection is derived from the previous healthy endpoints in the same way, so we only touch DNS when what's published changes
+		publishIPs := dc.publishedValues(newHealthyIPs)
+		previousPublishIPs := dc.publishedValues(currentHealthyIPs)
 
-		// Check if the DNS values have changed
-		if !utils.ElementsMatch(currentDNSValues, dnsValues) {
+		// Check if the published values have changed
+		if !utils.StringSlicesMatch(previousPublishIPs, publishIPs) {
 			// Update DNS records
-			if len(dnsValues) > 0 {
+			if len(publishIPs) > 0 {
 				var res dns.UpdateResult
 				if dc.recordType == config.RecordTypeCNAME {
 					// CNAME records are updated via the optional CNAMEUpdater interface
@@ -200,12 +197,12 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					if !ok {
 						err = fmt.Errorf("provider '%s' does not support CNAME records", dc.provider.Name())
 					} else {
-						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues[0])
+						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs[0])
 					}
 					// CNAME updaters don't report whether anything changed; we only get here when the values differ
-					res = dns.UpdateResult{Changed: true, Previous: currentDNSValues}
+					res = dns.UpdateResult{Changed: true, Previous: previousPublishIPs}
 				} else {
-					res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, dnsValues)
+					res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs)
 				}
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
@@ -216,18 +213,18 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 				}
 
 				if res.Changed {
-					domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", dnsValues, "previous", res.Previous)
+					domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", publishIPs, "previous", res.Previous)
 				} else {
-					domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", dnsValues)
+					domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", publishIPs)
 				}
 			} else {
 				domainLog.WarnContext(ctx, "No healthy endpoints found, not updating DNS")
 			}
 		} else {
-			domainLog.DebugContext(ctx, "Healthy endpoints unchanged, skipping DNS update", "healthy", dnsValues)
+			domainLog.DebugContext(ctx, "Published values unchanged, skipping DNS update", "healthy", newHealthyIPs, "published", publishIPs)
 		}
 
 		// Update the stored previous IPs
-		dc.setState(newHealthyIPs, dnsValues, failedIPs)
+		dc.setState(newHealthyIPs, publishIPs, failedIPs)
 	}
 }
