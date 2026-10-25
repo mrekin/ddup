@@ -182,7 +182,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		}
 		dc.setRecovering(recovering)
 
-		// Only the healthy endpoints with the lowest priority value are published; CNAME records hold a single value per name
+		// Only the healthy endpoints with the lowest priority value are published
 		// The previous selection is derived from the previous healthy endpoints in the same way, so we only touch DNS when what's published changes
 		publishIPs := dc.publishedValues(newHealthyIPs)
 		previousPublishIPs := dc.publishedValues(currentHealthyIPs)
@@ -193,24 +193,12 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		endpointStates := notifyEndpointStates(results, newHealthyIPs)
 		hc.notifyOutage(dc, domainName, endpointStates, previousPublishIPs, len(newHealthyIPs) == 0)
 
-		// Check if the published values have changed, or if a previous update failed and must be retried
+		// Check if the published IPs have changed, or if the last update failed
 		if dc.updatePending || !utils.StringSlicesMatch(previousPublishIPs, publishIPs) {
 			// Update DNS records
 			if len(publishIPs) > 0 {
 				var res dns.UpdateResult
-				if dc.recordType == config.RecordTypeCNAME {
-					// CNAME records are updated via the optional CNAMEUpdater interface
-					cu, ok := dc.provider.(dns.CNAMEUpdater)
-					if !ok {
-						err = fmt.Errorf("provider '%s' does not support CNAME records", dc.provider.Name())
-					} else {
-						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs[0])
-					}
-					// CNAME updaters don't report whether anything changed; we only get here when the values differ
-					res = dns.UpdateResult{Changed: true, Previous: previousPublishIPs}
-				} else {
-					res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs)
-				}
+				res, err = dc.updateDNSValues(ctx, publishIPs, previousPublishIPs)
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
 					hc.notifyUpdateFailed(dc, domainName, endpointStates, publishIPs, previousPublishIPs, err)
@@ -221,7 +209,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					dc.updatePending = false
 					dc.swapNotifiedError("")
 					if res.Changed {
-						domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", publishIPs, "previous", res.Previous)
+						domainLog.InfoContext(ctx, "Updated DNS records", "ips", publishIPs, "previous", res.Previous)
 						hc.notify(notify.Event{
 							Type:      config.EventDNSUpdated,
 							Domain:    domainName,
@@ -230,7 +218,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 							Previous:  res.Previous,
 						})
 					} else {
-						domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", publishIPs)
+						domainLog.InfoContext(ctx, "DNS records already up to date", "ips", publishIPs)
 					}
 				}
 			} else {
@@ -240,10 +228,10 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 				dc.updatePending = false
 			}
 		} else {
-			domainLog.DebugContext(ctx, "Published values unchanged, skipping DNS update", "healthy", newHealthyIPs, "published", publishIPs)
+			domainLog.DebugContext(ctx, "Published IPs unchanged, skipping DNS update", "healthy", newHealthyIPs, "published", publishIPs)
 		}
 
-		// Update the stored previous IPs: with the new values after a successful update, or with the old ones on failure so the update is retried
+		// Update the stored state, also when the update failed, so the health of the endpoints keeps being tracked
 		if err != nil {
 			dc.setStateFailed(newHealthyIPs, failedIPs, err)
 		} else {

@@ -27,12 +27,6 @@ type Provider interface {
 	UpdateRecords(ctx context.Context, domain string, ttl int, ips []string) (UpdateResult, error)
 }
 
-// CNAMEUpdater is an optional interface that providers can implement to support CNAME records
-type CNAMEUpdater interface {
-	// UpdateCNAME updates the CNAME record for the given domain, pointing it at target
-	UpdateCNAME(ctx context.Context, domain string, ttl int, target string) error
-}
-
 // NewProvider creates a new DNS provider based on the configuration
 func NewProvider(name string, cfg *config.ConfigProvider, metrics *appmetrics.AppMetrics) (provider Provider, err error) {
 	// We know that only one provider will be non-nil

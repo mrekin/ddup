@@ -12,17 +12,18 @@ type MockProvider struct {
 	// If true, UpdateRecords will return an error
 	ShouldError bool
 	CallCount   int
-	// Arguments captured from the last UpdateRecords call
-	LastDomain string
-	LastTTL    int
-	LastIPs    []string
-	// Arguments captured from the last UpdateCNAME call
-	CNAMETarget  string
-	CNAMEUpdated bool
 	// If true, UpdateRecords reports that nothing changed
 	NoChange bool
 	// IPs reported as previously in DNS
 	Previous []string
+	// IPs passed to the last call of UpdateRecords
+	LastIPs []string
+	// Arguments captured from the last UpdateRecords call
+	LastDomain string
+	LastTTL    int
+	// Arguments captured from the last UpdateCNAME call
+	CNAMETarget  string
+	CNAMEUpdated bool
 }
 
 // NewMockProvider creates a new MockProvider.
@@ -47,7 +48,7 @@ func (m *MockProvider) UpdateRecords(ctx context.Context, domain string, ttl int
 	return UpdateResult{Changed: !m.NoChange, Previous: m.Previous}, nil
 }
 
-// UpdateCNAME implements the CNAMEUpdater interface.
+// UpdateCNAME implements the CNAMEUpdater interface
 func (m *MockProvider) UpdateCNAME(ctx context.Context, domain string, ttl int, target string) error {
 	m.CallCount++
 	m.LastDomain = domain

@@ -171,19 +171,6 @@ func (s *Server) initAppServer() (err error) {
 	return nil
 }
 
-// withBasePath serves the given handler under a base path
-func withBasePath(basePath string, next http.Handler) http.Handler {
-	strip := http.StripPrefix(basePath, next)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Redirect requests without the trailing slash (e.g. "/ddup" to "/ddup/")
-		if r.URL.Path == basePath {
-			http.Redirect(w, r, basePath+"/", http.StatusMovedPermanently)
-			return
-		}
-		strip.ServeHTTP(w, r)
-	})
-}
-
 // Run the web server
 // Note this function is blocking, and will return only when the server is shut down via context cancellation.
 func (s *Server) Run(ctx context.Context) error {
@@ -247,14 +234,13 @@ func (s *Server) startAppServer(ctx context.Context, appSrvErrCh chan<- error) e
 	}
 
 	// Start the HTTP(S) server in a background goroutine
-	attrs := []slog.Attr{
+	slog.InfoContext(ctx, "App server started",
 		slog.String("bind", cfg.Server.Bind),
 		slog.Int("port", cfg.Server.Port),
-	}
+	)
 	if basePath := cfg.Server.GetBasePath(); basePath != "" {
-		attrs = append(attrs, slog.String("basePath", basePath))
+		slog.InfoContext(ctx, "App server serves the dashboard at base path", "basePath", basePath)
 	}
-	slog.LogAttrs(ctx, slog.LevelInfo, "App server started", attrs...)
 	go func() { //nolint:contextcheck
 		defer s.appListener.Close() //nolint:errcheck
 

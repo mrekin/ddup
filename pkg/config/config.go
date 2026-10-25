@@ -6,20 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/netip"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
-)
-
-// Supported DNS record types
-const (
-	// RecordTypeA manages IPv4 and IPv6 address records (the default; the record type
-	// is detected automatically from each endpoint's IP address)
-	RecordTypeA = "A"
-	// RecordTypeCNAME manages a CNAME record; the endpoints' `ip` field holds the target hostname
-	RecordTypeCNAME = "CNAME"
 )
 
 // Config represents the application configuration
@@ -249,15 +239,6 @@ type ConfigServer struct {
 	BasePath string `yaml:"basePath"`
 }
 
-// GetBasePath returns the normalized base path: an empty string if unset, otherwise a path with a leading "/" and no trailing slash
-func (c ConfigServer) GetBasePath() string {
-	p := strings.Trim(strings.TrimSpace(c.BasePath), "/")
-	if p == "" {
-		return ""
-	}
-	return "/" + p
-}
-
 // ConfigDev includes options using during development only
 type ConfigDev struct {
 	// If true, enables CORS from anywhere
@@ -334,25 +315,6 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			return fmt.Errorf("domain %d is invalid: provider '%s' does not exist in the provider configuration", di, d.Provider)
 		}
 
-		// Validate the record type; the default is "A"
-		d.RecordType = strings.ToUpper(strings.TrimSpace(d.RecordType))
-		switch d.RecordType {
-		case "", RecordTypeA:
-			d.RecordType = RecordTypeA
-		case RecordTypeCNAME:
-			// CNAME records are implemented by the Cloudflare provider only
-			if p := c.Providers[d.Provider]; p.Cloudflare == nil {
-				return fmt.Errorf("domain %s is invalid: recordType '%s' is only supported by the Cloudflare provider, but provider '%s' is not a Cloudflare provider", d.RecordName, d.RecordType, d.Provider)
-			}
-		default:
-			return fmt.Errorf("domain %s is invalid: recordType must be %q or %q (got '%s')", d.RecordName, RecordTypeA, RecordTypeCNAME, d.RecordType)
-		}
-
-		// Default TTL is 120s
-		if d.TTL <= 0 {
-			d.TTL = 120
-		}
-
 		// Validate the health check settings
 		d.HealthChecks.Method = strings.ToUpper(d.HealthChecks.Method)
 		switch d.HealthChecks.Method {
@@ -368,6 +330,17 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			return fmt.Errorf("domain %s is invalid: healthChecks.recoverAfter must not be negative", d.RecordName)
 		}
 
+		// Validate the record type; the default is "A"
+		err = validateRecordType(d, c.Providers[d.Provider])
+		if err != nil {
+			return err
+		}
+
+		// Default TTL is 120s
+		if d.TTL <= 0 {
+			d.TTL = 120
+		}
+
 		// Validate endpoints for this domain
 		for ei, v := range d.Endpoints {
 			if v.URL == "" {
@@ -379,18 +352,9 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			if v.Priority < 0 {
 				return fmt.Errorf("domain %s endpoint %d is invalid: priority must not be negative", d.RecordName, ei)
 			}
-			if d.RecordType == RecordTypeCNAME {
-				// A CNAME target must be a hostname, not an IP address
-				_, err := netip.ParseAddr(strings.TrimSpace(v.IP))
-				if err == nil {
-					return fmt.Errorf("domain %s endpoint %d is invalid: ip '%s' is an IP address, which is not a valid target for a CNAME record", d.RecordName, ei, v.IP)
-				}
-			} else {
-				ip, err := netip.ParseAddr(v.IP)
-				if err != nil {
-					return fmt.Errorf("domain %s endpoint %d is invalid: IP %q is not a valid IPv4 or IPv6 address", d.RecordName, ei, v.IP)
-				}
-				v.IP = ip.String()
+			err := validateEndpointIP(d, ei, v)
+			if err != nil {
+				return err
 			}
 			if v.Name == "" {
 				v.Name = v.URL
