@@ -133,7 +133,7 @@ const expectStatusIcon = async (page: Page, status: OverallStatus) => {
     // The new one is the pre-rendered PNG of the status, bundled as a separate file instead of a data URL
     await expect(tabIcon(page)).toHaveCount(1)
     await expect(tabIcon(page)).toHaveAttribute('type', 'image/png')
-    await expect(tabIcon(page)).toHaveAttribute('href', new RegExp(`^/assets/${status}-[\\w-]+\\.png$`))
+    await expect(tabIcon(page)).toHaveAttribute('href', new RegExp(`/assets/${status}-[\\w-]+\\.png$`))
 
     const href = await tabIcon(page).evaluate((link: HTMLLinkElement) => link.href)
     const response = await page.request.get(href)
@@ -450,7 +450,8 @@ test.describe('status icon', () => {
         test('index.html has a static icon', async ({ page }) => {
             await page.goto('/')
 
-            await expect(tabIcon(page)).toHaveAttribute('href', '/favicon.svg')
+            // The vite config uses a relative base, so the built page references the icon as "./favicon.svg", which resolves against the page URL
+            await expect(tabIcon(page)).toHaveAttribute('href', /(?:^|\/)favicon\.svg$/)
             const response = await page.request.get('/favicon.svg')
             expect(response.ok()).toBe(true)
             expect(response.headers()['content-type']).toBe('image/svg+xml')

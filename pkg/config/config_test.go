@@ -248,6 +248,24 @@ func TestValidate(t *testing.T) {
 			mutate:    func(c *Config) { c.Domains[0].Endpoints[0].IP = "" },
 			expectErr: "domain test.example.com endpoint 0 is invalid: IP is empty",
 		},
+		{
+			name: "CNAME record type with a non-Cloudflare provider",
+			mutate: func(c *Config) {
+				c.Providers["test"] = ConfigProvider{OVH: &OVHConfig{}}
+				c.Domains[0].RecordType = "CNAME"
+			},
+			expectErr: "recordType 'CNAME' is only supported by the Cloudflare provider, but provider 'test' is not a Cloudflare provider",
+		},
+		{
+			name:      "unknown record type",
+			mutate:    func(c *Config) { c.Domains[0].RecordType = "TXT" },
+			expectErr: `recordType must be "A" or "CNAME" (got 'TXT')`,
+		},
+		{
+			name:      "CNAME target that is an IP address",
+			mutate:    func(c *Config) { c.Domains[0].RecordType = "CNAME" },
+			expectErr: "ip '192.0.2.1' is an IP address, which is not a valid target for a CNAME record",
+		},
 	}
 
 	for _, tc := range errorTests {
@@ -286,6 +304,17 @@ func TestValidate(t *testing.T) {
 		err := cfg.Validate(slog.Default())
 		require.NoError(t, err)
 		assert.Equal(t, 300, cfg.Domains[0].TTL)
+	})
+
+	t.Run("recordType CNAME is normalized", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.Domains[0].RecordType = "cname"
+		// With a CNAME record, the endpoints' IP field holds the target hostname
+		cfg.Domains[0].Endpoints[0].IP = "target.example.com"
+
+		err := cfg.Validate(slog.Default())
+		require.NoError(t, err)
+		assert.Equal(t, RecordTypeCNAME, cfg.Domains[0].RecordType)
 	})
 }
 
