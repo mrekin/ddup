@@ -381,7 +381,8 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			}
 			if d.RecordType == RecordTypeCNAME {
 				// A CNAME target must be a hostname, not an IP address
-				if _, err := netip.ParseAddr(strings.TrimSpace(v.IP)); err == nil {
+				_, err := netip.ParseAddr(strings.TrimSpace(v.IP))
+				if err == nil {
 					return fmt.Errorf("domain %s endpoint %d is invalid: ip '%s' is an IP address, which is not a valid target for a CNAME record", d.RecordName, ei, v.IP)
 				}
 			} else {

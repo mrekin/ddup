@@ -175,7 +175,7 @@ const DomainMonitorDashboard = ({ endpoint }: { endpoint: string }) => {
       controller.abort()
       clearInterval(interval)
     }
-  }, [autoRefresh, endpoint, fetchNotifications])
+  }, [autoRefresh, endpoint])
 
   const refreshClicked = async () => {
     await fetchDomains()
