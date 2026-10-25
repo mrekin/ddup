@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,14 +22,6 @@ const (
 	RecordTypeCNAME = "CNAME"
 )
 
-// DefaultNtfyServer is the ntfy server used when notifications are enabled and no server is configured
-const DefaultNtfyServer = "https://ntfy.sh"
-
-const defaultNtfyTimeout = 10 * time.Second
-
-// ntfy topics may contain letters, numbers, underscores and dashes, up to 128 characters
-var ntfyTopicPattern = regexp.MustCompile("^[-_A-Za-z0-9]{1,128}$")
-
 // Config represents the application configuration
 type Config struct {
 	// Interval to perform health checks, as a duration
@@ -44,14 +34,14 @@ type Config struct {
 	// Provider contains shared provider configuration (shared across all domains)
 	Providers map[string]ConfigProvider `yaml:"providers"`
 
+	// Notifications configures the notifications sent when the DNS records of a domain change or when it has no healthy endpoints
+	Notifications ConfigNotifications `yaml:"notifications"`
+
 	// Logs contains configuration for logging
 	Logs ConfigLogs `yaml:"logs"`
 
 	// Server contains configuration for the server
 	Server ConfigServer `yaml:"server"`
-
-	// Notifications contains configuration for push notifications
-	Notifications ConfigNotifications `yaml:"notifications"`
 
 	// Dev is meant for development only; it's undocumented
 	Dev ConfigDev `yaml:"-"`
@@ -169,6 +159,10 @@ type ConfigProvider struct {
 	OVH *OVHConfig `yaml:"ovh"`
 	// Config for the Azure DNS provider
 	Azure *AzureConfig `yaml:"azure"`
+	// Config for the AWS Route53 provider
+	AWSRoute53 *AWSRoute53Config `yaml:"awsRoute53"`
+	// Config for the Google Cloud DNS provider
+	GoogleCloudDNS *GoogleCloudDNSConfig `yaml:"googleCloudDns"`
 }
 
 // CloudflareConfig represents Cloudflare-specific configuration
@@ -200,6 +194,28 @@ type AzureConfig struct {
 	ClientSecret string `yaml:"clientSecret,omitempty"`
 	// Managed identity client ID for authenticating with a user-assigned managed identity
 	ManagedIdentityClientID string `yaml:"managedIdentityClientId,omitempty"`
+}
+
+// AWSRoute53Config represents AWS Route53-specific configuration
+type AWSRoute53Config struct {
+	// ID of the hosted zone (e.g. "Z0123456789ABCDEFGHIJ")
+	HostedZoneID string `yaml:"hostedZoneId"`
+	// Access key ID for authenticating with static credentials
+	// If empty, uses the default AWS credential chain
+	AccessKeyID string `yaml:"accessKeyId,omitempty"`
+	// Secret access key for authenticating with static credentials
+	SecretAccessKey string `yaml:"secretAccessKey,omitempty"`
+}
+
+// GoogleCloudDNSConfig represents Google Cloud DNS-specific configuration
+type GoogleCloudDNSConfig struct {
+	// ID of the Google Cloud project containing the managed zone
+	ProjectID string `yaml:"projectId"`
+	// Name of the managed zone resource (e.g. "my-zone"), which is not the DNS name
+	ManagedZone string `yaml:"managedZone"`
+	// Path to a service account key file
+	// If empty, uses Application Default Credentials
+	CredentialsFile string `yaml:"credentialsFile,omitempty"`
 }
 
 // ConfigLogs represents logging configuration
@@ -240,30 +256,6 @@ func (c ConfigServer) GetBasePath() string {
 		return ""
 	}
 	return "/" + p
-}
-
-// ConfigNotifications configures ntfy push notifications for health check and DNS events
-type ConfigNotifications struct {
-	// URL of the ntfy server
-	// +default "https://ntfy.sh"
-	Server string `yaml:"server"`
-
-	// ntfy topic to publish notifications to
-	// Notifications are disabled when empty
-	// On a public ntfy server the topic name acts as a password, so pick a hard-to-guess one
-	Topic string `yaml:"topic"`
-
-	// Optional ntfy access token (tk_...), sent as a Bearer token to publish to protected topics
-	Token string `yaml:"token"`
-
-	// Timeout for publishing each notification
-	// +default 10s
-	Timeout time.Duration `yaml:"timeout"`
-}
-
-// IsEnabled returns true if notifications are configured
-func (c ConfigNotifications) IsEnabled() bool {
-	return strings.TrimSpace(c.Topic) != ""
 }
 
 // ConfigDev includes options using during development only
@@ -405,25 +397,10 @@ func (c *Config) Validate(logger *slog.Logger) error {
 		}
 	}
 
-	// Validate the notifications settings
-	c.Notifications.Topic = strings.TrimSpace(c.Notifications.Topic)
-	if c.Notifications.IsEnabled() {
-		if !ntfyTopicPattern.MatchString(c.Notifications.Topic) {
-			return errors.New("notifications.topic is invalid: it may contain only letters, numbers, underscores and dashes, up to 128 characters")
-		}
-		if c.Notifications.Server == "" {
-			c.Notifications.Server = DefaultNtfyServer
-		}
-		serverURL, err := url.Parse(c.Notifications.Server)
-		if err != nil || (serverURL.Scheme != "http" && serverURL.Scheme != "https") || serverURL.Host == "" {
-			return fmt.Errorf("notifications.server is invalid: it must be a valid http(s) URL, got '%s'", c.Notifications.Server)
-		}
-		c.Notifications.Server = strings.TrimRight(c.Notifications.Server, "/")
-		if c.Notifications.Timeout <= 0 {
-			c.Notifications.Timeout = defaultNtfyTimeout
-		}
-	} else if c.Notifications.Server != "" || c.Notifications.Token != "" || c.Notifications.Timeout > 0 {
-		return errors.New("notifications.topic is required when any other notifications option is set")
+	// Validate the notifications
+	err := c.Notifications.validate()
+	if err != nil {
+		return err
 	}
 
 	return nil

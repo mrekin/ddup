@@ -23,10 +23,10 @@ import (
 type HealthChecker struct {
 	// Key is domain name
 	domainCheckers map[string]*domainChecker
+	// Optional, may be nil
+	notifier Notifier
 	// Requests to run a check right away; handled by Run, so checks never overlap
 	forceCh chan forceRequest
-	// Optional recipient of health check and DNS events
-	notifier notify.Notifier
 }
 
 // If a check completed more recently than this, a forced check returns without running another
@@ -41,8 +41,7 @@ type forceRequest struct {
 var ErrNotRunning = errors.New("health checker is not running")
 
 // NewHealthChecker creates a new HealthChecker instance
-// The notifier is optional and can be nil
-func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.AppMetrics, notifier notify.Notifier) (*HealthChecker, error) {
+func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.AppMetrics) (*HealthChecker, error) {
 	cfg := config.Get()
 
 	dcs := make(map[string]*domainChecker, len(cfg.Domains))
@@ -65,7 +64,6 @@ func NewHealthChecker(dnsProviders map[string]dns.Provider, metrics *appmetrics.
 	return &HealthChecker{
 		domainCheckers: dcs,
 		forceCh:        make(chan forceRequest, 1),
-		notifier:       notifier,
 	}, nil
 }
 
@@ -135,9 +133,6 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		currentHealthyIPs, failedIPs, _, _, _ := dc.getState()
 		failedIPs = maps.Clone(failedIPs)
 
-		// Notifications are only sent when a previous state exists, so the first run doesn't report every endpoint as recovered
-		initialized := len(currentHealthyIPs) > 0 || len(failedIPs) > 0
-
 		// Perform health checks for this domain
 		results := dc.checker.CheckAll(ctx)
 
@@ -166,11 +161,6 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 				newHealthyIPs = append(newHealthyIPs, ip)
 				delete(failedIPs, ip)
 				delete(recovering, ip)
-
-				// An endpoint that was not healthy before has just recovered (possibly after the recovery period)
-				if hc.notifier != nil && initialized && !slices.Contains(currentHealthyIPs, ip) {
-					hc.notifier.EndpointUp(ctx, domainName, result.Endpoint.Name, ip)
-				}
 				continue
 			}
 
@@ -188,9 +178,6 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 			// This is to allow for retries
 			if failedIPs[ip] < maxAttempts && slices.Contains(currentHealthyIPs, ip) {
 				newHealthyIPs = append(newHealthyIPs, ip)
-			} else if hc.notifier != nil && initialized && slices.Contains(currentHealthyIPs, ip) {
-				// An endpoint that was healthy before has exhausted all retries and is now down
-				hc.notifier.EndpointDown(ctx, domainName, result.Endpoint.Name, ip, result.Error)
 			}
 		}
 		dc.setRecovering(recovering)
@@ -200,9 +187,14 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		publishIPs := dc.publishedValues(newHealthyIPs)
 		previousPublishIPs := dc.publishedValues(currentHealthyIPs)
 
-		var updateErr error
+		var err error
+
+		// Notify when the domain has no healthy endpoints
+		endpointStates := notifyEndpointStates(results, newHealthyIPs)
+		hc.notifyOutage(dc, domainName, endpointStates, previousPublishIPs, len(newHealthyIPs) == 0)
+
 		// Check if the published values have changed, or if a previous update failed and must be retried
-		if !utils.StringSlicesMatch(previousPublishIPs, publishIPs) || dc.isDNSDirty() {
+		if dc.updatePending || !utils.StringSlicesMatch(previousPublishIPs, publishIPs) {
 			// Update DNS records
 			if len(publishIPs) > 0 {
 				var res dns.UpdateResult
@@ -210,38 +202,50 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 					// CNAME records are updated via the optional CNAMEUpdater interface
 					cu, ok := dc.provider.(dns.CNAMEUpdater)
 					if !ok {
-						updateErr = fmt.Errorf("provider '%s' does not support CNAME records", dc.provider.Name())
+						err = fmt.Errorf("provider '%s' does not support CNAME records", dc.provider.Name())
 					} else {
-						updateErr = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs[0])
+						err = cu.UpdateCNAME(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs[0])
 					}
 					// CNAME updaters don't report whether anything changed; we only get here when the values differ
 					res = dns.UpdateResult{Changed: true, Previous: previousPublishIPs}
 				} else {
-					res, updateErr = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs)
+					res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, publishIPs)
 				}
-				if updateErr != nil {
-					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", updateErr)
-					if hc.notifier != nil {
-						hc.notifier.DNSUpdateFailed(ctx, domainName, dc.recordType, updateErr)
-					}
-				} else if res.Changed {
-					domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", publishIPs, "previous", res.Previous)
-					if hc.notifier != nil {
-						hc.notifier.DNSUpdated(ctx, domainName, dc.recordType, publishIPs, res.Previous)
-					}
+				if err != nil {
+					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
+					hc.notifyUpdateFailed(dc, domainName, endpointStates, publishIPs, previousPublishIPs, err)
+
+					// Try again at the next check, even if the published IPs do not change
+					dc.updatePending = true
 				} else {
-					domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", publishIPs)
+					dc.updatePending = false
+					dc.swapNotifiedError("")
+					if res.Changed {
+						domainLog.InfoContext(ctx, "Updated DNS records", "recordType", dc.recordType, "values", publishIPs, "previous", res.Previous)
+						hc.notify(notify.Event{
+							Type:      config.EventDNSUpdated,
+							Domain:    domainName,
+							Endpoints: endpointStates,
+							Published: publishIPs,
+							Previous:  res.Previous,
+						})
+					} else {
+						domainLog.InfoContext(ctx, "DNS records already up to date", "recordType", dc.recordType, "values", publishIPs)
+					}
 				}
 			} else {
 				domainLog.WarnContext(ctx, "No healthy endpoints found, not updating DNS")
+
+				// There is nothing to publish, and DNS is left as it is
+				dc.updatePending = false
 			}
 		} else {
 			domainLog.DebugContext(ctx, "Published values unchanged, skipping DNS update", "healthy", newHealthyIPs, "published", publishIPs)
 		}
 
 		// Update the stored previous IPs: with the new values after a successful update, or with the old ones on failure so the update is retried
-		if updateErr != nil {
-			dc.setStateFailed(newHealthyIPs, failedIPs, updateErr)
+		if err != nil {
+			dc.setStateFailed(newHealthyIPs, failedIPs, err)
 		} else {
 			dc.setState(newHealthyIPs, publishIPs, failedIPs)
 		}

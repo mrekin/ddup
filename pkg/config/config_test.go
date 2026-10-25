@@ -4,9 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	configkit "github.com/italypaleale/go-kit/config"
 	"github.com/stretchr/testify/assert"
@@ -295,6 +293,9 @@ func TestCountSetProperties(t *testing.T) {
 	assert.Equal(t, 0, countSetProperties(ConfigProvider{}))
 	assert.Equal(t, 1, countSetProperties(ConfigProvider{Azure: &AzureConfig{}}))
 	assert.Equal(t, 2, countSetProperties(&ConfigProvider{Azure: &AzureConfig{}, OVH: &OVHConfig{}}))
+	assert.Equal(t, 1, countSetProperties(ConfigProvider{AWSRoute53: &AWSRoute53Config{}}))
+	assert.Equal(t, 1, countSetProperties(ConfigProvider{GoogleCloudDNS: &GoogleCloudDNSConfig{}}))
+	assert.Equal(t, 2, countSetProperties(ConfigProvider{AWSRoute53: &AWSRoute53Config{}, GoogleCloudDNS: &GoogleCloudDNSConfig{}}))
 	assert.Panics(t, func() {
 		countSetProperties("not a struct")
 	})
@@ -318,111 +319,4 @@ func TestSampleConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, cfg.Domains)
 	assert.NotEmpty(t, cfg.Providers)
-}
-
-func TestValidateNotifications(t *testing.T) {
-	// Base on GetDefaultConfig, like the real startup path, so defaults that would trip validation don't go unnoticed
-	validConfig := func() *Config {
-		cfg := GetDefaultConfig()
-		cfg.Providers = map[string]ConfigProvider{
-			"test": {Cloudflare: &CloudflareConfig{}},
-		}
-		cfg.Domains = []ConfigDomain{
-			{
-				RecordName: "test.example.com",
-				Provider:   "test",
-				Endpoints: []*ConfigEndpoint{
-					{URL: "https://test.example.com/health", IP: "192.0.2.1"},
-				},
-			},
-		}
-		return cfg
-	}
-
-	tests := []struct {
-		name          string
-		notifications ConfigNotifications
-		assertFn      func(t *testing.T, cfg *Config, err error)
-	}{
-		{
-			name: "empty section is valid and disabled",
-			assertFn: func(t *testing.T, cfg *Config, err error) {
-				require.NoError(t, err)
-				assert.False(t, cfg.Notifications.IsEnabled())
-				assert.Empty(t, cfg.Notifications.Server)
-				assert.Zero(t, cfg.Notifications.Timeout)
-			},
-		},
-		{
-			name:          "topic enables notifications and applies defaults",
-			notifications: ConfigNotifications{Topic: " my-topic "},
-			assertFn: func(t *testing.T, cfg *Config, err error) {
-				require.NoError(t, err)
-				assert.True(t, cfg.Notifications.IsEnabled())
-				assert.Equal(t, "my-topic", cfg.Notifications.Topic)
-				assert.Equal(t, DefaultNtfyServer, cfg.Notifications.Server)
-				assert.Equal(t, 10*time.Second, cfg.Notifications.Timeout)
-			},
-		},
-		{
-			name:          "custom server and timeout are kept",
-			notifications: ConfigNotifications{Topic: "t", Server: "http://localhost:8080/", Timeout: 5 * time.Second},
-			assertFn: func(t *testing.T, cfg *Config, err error) {
-				require.NoError(t, err)
-				assert.Equal(t, "http://localhost:8080", cfg.Notifications.Server)
-				assert.Equal(t, 5*time.Second, cfg.Notifications.Timeout)
-			},
-		},
-		{
-			name:          "token with topic is valid",
-			notifications: ConfigNotifications{Topic: "t", Token: "tk_x"},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.NoError(t, err)
-			},
-		},
-		{
-			name:          "options without topic are invalid",
-			notifications: ConfigNotifications{Token: "tk_x"},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.ErrorContains(t, err, "notifications.topic is required")
-			},
-		},
-		{
-			name:          "invalid topic characters",
-			notifications: ConfigNotifications{Topic: "my topic!"},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.ErrorContains(t, err, "notifications.topic is invalid")
-			},
-		},
-		{
-			name:          "topic that is too long",
-			notifications: ConfigNotifications{Topic: strings.Repeat("a", 129)},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.ErrorContains(t, err, "notifications.topic is invalid")
-			},
-		},
-		{
-			name:          "invalid server scheme",
-			notifications: ConfigNotifications{Topic: "t", Server: "ftp://ntfy.example.com"},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.ErrorContains(t, err, "notifications.server is invalid")
-			},
-		},
-		{
-			name:          "invalid server URL",
-			notifications: ConfigNotifications{Topic: "t", Server: "not a url"},
-			assertFn: func(t *testing.T, _ *Config, err error) {
-				require.ErrorContains(t, err, "notifications.server is invalid")
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.Notifications = tc.notifications
-			err := cfg.Validate(slog.Default())
-			tc.assertFn(t, cfg, err)
-		})
-	}
 }

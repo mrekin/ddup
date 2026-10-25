@@ -3,8 +3,6 @@ package healthcheck
 import (
 	"context"
 	"errors"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -248,27 +246,106 @@ func TestHealthChecker_DNSProviderError(t *testing.T) {
 	}
 
 	// Create the test HealthChecker
+	dc := &domainChecker{
+		checker:    mockChecker,
+		ttl:        60,
+		healthyIPs: []string{}, // Start with empty to trigger DNS update
+		failedIPs:  make(map[string]int),
+		provider:   mockProvider,
+	}
 	hc := &HealthChecker{
 		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    mockChecker,
-				ttl:        60,
-				healthyIPs: []string{}, // Start with empty to trigger DNS update
-				failedIPs:  make(map[string]int),
-				provider:   mockProvider,
-			},
+			"example.com": dc,
 		},
 	}
 
 	// Run the check
 	hc.checkAndUpdateDNS(t.Context())
 
-	// The endpoint state is refreshed even though the DNS update failed
-	assert.Equal(t, []string{"1.1.1.1"}, hc.domainCheckers["example.com"].healthyIPs, "Expected healthy IPs to be updated")
+	// The endpoint state is refreshed even though the DNS update failed, and the health of the endpoints is tracked anyway
+	assert.Equal(t, 1, mockProvider.CallCount)
+	assert.Equal(t, "Error updating DNS records: mock error", dc.lastError)
+	assert.Equal(t, []string{"1.1.1.1"}, dc.healthyIPs, "the endpoint state is refreshed even though the DNS update failed")
 	// The DNS values are unchanged, since nothing was written, and the update is flagged for retry
-	assert.Empty(t, hc.domainCheckers["example.com"].dnsValues, "Expected DNS values to remain unchanged due to DNS error")
-	assert.True(t, hc.domainCheckers["example.com"].isDNSDirty(), "Expected the DNS update to be retried")
+	assert.Empty(t, dc.dnsValues, "Expected DNS values to remain unchanged due to DNS error")
+	assert.True(t, dc.updatePending, "Expected the DNS update to be retried")
 	assert.NotEmpty(t, hc.GetDomainStatus("example.com").Error, "Expected the error to be reported in the status")
+
+	// The next check tries again, even if the published IPs did not change
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 2, mockProvider.CallCount)
+	assert.Equal(t, "Error updating DNS records: mock error", dc.lastError)
+
+	// When the provider works again, the update goes through and the error is cleared
+	mockProvider.ShouldError = false
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 3, mockProvider.CallCount)
+	assert.Equal(t, []string{"1.1.1.1"}, mockProvider.LastIPs)
+	assert.Empty(t, dc.lastError)
+
+	// Nothing changes any more, so DNS is left alone
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 3, mockProvider.CallCount)
+}
+
+func TestHealthChecker_DNSProviderErrorKeepsTrackingHealth(t *testing.T) {
+	mockProvider := dns.NewMockProvider(false)
+
+	endpoints := []*config.ConfigEndpoint{
+		{Name: "endpoint1", IP: "1.1.1.1"},
+		{Name: "endpoint2", IP: "2.2.2.2"},
+	}
+	mockChecker := &checker.MockChecker{
+		Domain:      "example.com",
+		MaxAttempts: 2,
+		Results: []checker.Result{
+			{Endpoint: endpoints[0], Healthy: true},
+			{Endpoint: endpoints[1], Healthy: true},
+		},
+	}
+	dc := &domainChecker{
+		checker:   mockChecker,
+		ttl:       60,
+		failedIPs: make(map[string]int),
+		provider:  mockProvider,
+	}
+	hc := &HealthChecker{
+		domainCheckers: map[string]*domainChecker{
+			"example.com": dc,
+		},
+	}
+
+	// Both endpoints are healthy and published
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 1, mockProvider.CallCount)
+
+	// The second endpoint fails while the provider is down
+	mockProvider.ShouldError = true
+	mockChecker.Results = []checker.Result{
+		{Endpoint: endpoints[0], Healthy: true},
+		{Endpoint: endpoints[1], Healthy: false, Error: errors.New("connection failed")},
+	}
+
+	// The first failure is still within the attempts, so the endpoint is healthy and nothing is published
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 1, mockProvider.CallCount)
+	assert.ElementsMatch(t, []string{"1.1.1.1", "2.2.2.2"}, dc.healthyIPs)
+	assert.Equal(t, 1, dc.failedIPs["2.2.2.2"])
+
+	// The second failure removes it, and the update fails
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 2, mockProvider.CallCount)
+	assert.Equal(t, []string{"1.1.1.1"}, mockProvider.LastIPs)
+	assert.Equal(t, []string{"1.1.1.1"}, dc.healthyIPs, "the failing endpoint is not healthy any more, even if DNS could not be updated")
+	assert.Equal(t, 2, dc.failedIPs["2.2.2.2"])
+	assert.Equal(t, "Error updating DNS records: mock error", dc.lastError)
+
+	// The provider works again, and the endpoint is removed from DNS
+	mockProvider.ShouldError = false
+	hc.checkAndUpdateDNS(t.Context())
+	assert.Equal(t, 3, mockProvider.CallCount)
+	assert.Equal(t, []string{"1.1.1.1"}, mockProvider.LastIPs)
+	assert.Empty(t, dc.lastError)
 }
 
 func TestHealthChecker_NoChangeSkipsUpdate(t *testing.T) {
@@ -628,7 +705,7 @@ func TestNewHealthChecker(t *testing.T) {
 	t.Run("creates a checker for each domain", func(t *testing.T) {
 		p1 := dns.NewMockProvider(false)
 		p2 := dns.NewMockProvider(false)
-		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": p1, "p2": p2}, nil, nil)
+		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": p1, "p2": p2}, nil)
 		require.NoError(t, err)
 		require.Len(t, hc.domainCheckers, 2)
 		assert.NotNil(t, hc.forceCh)
@@ -654,7 +731,7 @@ func TestNewHealthChecker(t *testing.T) {
 	})
 
 	t.Run("forced check before Run times out", func(t *testing.T) {
-		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": dns.NewMockProvider(false)}, nil, nil)
+		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": dns.NewMockProvider(false)}, nil)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
@@ -664,20 +741,21 @@ func TestNewHealthChecker(t *testing.T) {
 	})
 
 	t.Run("provider not configured", func(t *testing.T) {
-		_, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false)}, nil, nil)
+		_, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false)}, nil)
 		require.ErrorContains(t, err, "domain 'b.example.com' references DNS provider 'p2' that is not configured")
 	})
 
 	t.Run("nil provider", func(t *testing.T) {
-		_, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": nil}, nil, nil)
+		_, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": nil}, nil)
 		require.ErrorContains(t, err, "DNS provider 'p2' that is not configured")
 	})
 
 	t.Run("notifier is stored", func(t *testing.T) {
-		fn := &fakeNotifier{}
-		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": dns.NewMockProvider(false)}, nil, fn)
+		fn := &recordingNotifier{}
+		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": dns.NewMockProvider(false)}, nil)
 		require.NoError(t, err)
-		assert.Same(t, fn, hc.notifier)
+		hc.SetNotifier(fn)
+		assert.Same(t, fn, Notifier(fn))
 	})
 }
 
@@ -727,341 +805,4 @@ func TestHealthChecker_RunOnInterval(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after the context was canceled")
 	}
-}
-
-// fakeNotifier records the events the health checker emits
-type fakeNotifier struct {
-	mu     sync.Mutex
-	downs  []string
-	ups    []string
-	dnsOk  []string
-	dnsErr []string
-}
-
-func (f *fakeNotifier) EndpointDown(_ context.Context, domain string, endpoint string, ip string, _ error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.downs = append(f.downs, domain+"/"+endpoint+"/"+ip)
-}
-
-func (f *fakeNotifier) EndpointUp(_ context.Context, domain string, endpoint string, ip string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ups = append(f.ups, domain+"/"+endpoint+"/"+ip)
-}
-
-func (f *fakeNotifier) DNSUpdated(_ context.Context, domain string, recordType string, values []string, previous []string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.dnsOk = append(f.dnsOk, domain+"/"+recordType+"/"+strings.Join(values, ",")+"/"+strings.Join(previous, ","))
-}
-
-func (f *fakeNotifier) DNSUpdateFailed(_ context.Context, domain string, recordType string, _ error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.dnsErr = append(f.dnsErr, domain+"/"+recordType)
-}
-
-func TestHealthChecker_Notifications_EndpointDown(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: false, Error: errors.New("connection failed")},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 3, Results: results},
-				ttl:        60,
-				healthyIPs: []string{"1.1.1.1", "2.2.2.2"},
-				dnsValues:  []string{"1.1.1.1", "2.2.2.2"},
-				failedIPs:  make(map[string]int),
-				provider:   dns.NewMockProvider(false),
-			},
-		},
-	}
-
-	// The first two failures are within the retry window: no notification
-	hc.checkAndUpdateDNS(t.Context())
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Empty(t, fn.downs, "no notification while retries are not exhausted")
-
-	// The third failure exhausts the retries: exactly one down notification
-	hc.checkAndUpdateDNS(t.Context())
-	require.Len(t, fn.downs, 1)
-	assert.Equal(t, "example.com/endpoint2/2.2.2.2", fn.downs[0])
-
-	// While the endpoint stays down, no new notifications are sent
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Len(t, fn.downs, 1)
-}
-
-func TestHealthChecker_Notifications_NoRepeatWhileDown(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: false, Error: errors.New("down")},
-		{Endpoint: endpoints[1], Healthy: false, Error: errors.New("down")},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 1, Results: results},
-				ttl:        60,
-				healthyIPs: []string{"1.1.1.1", "2.2.2.2"},
-				failedIPs:  make(map[string]int),
-				provider:   dns.NewMockProvider(false),
-			},
-		},
-	}
-
-	for range 3 {
-		hc.checkAndUpdateDNS(t.Context())
-	}
-
-	assert.Len(t, fn.downs, 2, "one down notification per endpoint, no repeats")
-}
-
-func TestHealthChecker_Notifications_EndpointUp(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 1, Results: results},
-				ttl:        60,
-				healthyIPs: []string{"1.1.1.1"},
-				failedIPs:  map[string]int{"2.2.2.2": 5},
-				provider:   dns.NewMockProvider(false),
-			},
-		},
-	}
-
-	hc.checkAndUpdateDNS(t.Context())
-
-	require.Len(t, fn.ups, 1)
-	assert.Equal(t, "example.com/endpoint2/2.2.2.2", fn.ups[0])
-}
-
-func TestHealthChecker_Notifications_RecoverAfterDelay(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 1, RecoverAfter: 3, Results: results},
-				ttl:        60,
-				healthyIPs: []string{"1.1.1.1"},
-				failedIPs:  map[string]int{"2.2.2.2": 5},
-				recovering: make(map[string]int),
-				provider:   dns.NewMockProvider(false),
-			},
-		},
-	}
-
-	// The first two successful checks are within the recovery period: no notification
-	hc.checkAndUpdateDNS(t.Context())
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Empty(t, fn.ups, "no notification while recovering")
-
-	// The third consecutive success adds the endpoint back: one up notification
-	hc.checkAndUpdateDNS(t.Context())
-	require.Len(t, fn.ups, 1)
-	assert.Equal(t, "example.com/endpoint2/2.2.2.2", fn.ups[0])
-}
-
-func TestHealthChecker_Notifications_FirstRunSuppressed(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 2, Results: results},
-				ttl:        60,
-				healthyIPs: []string{},
-				failedIPs:  make(map[string]int),
-				provider:   dns.NewMockProvider(false),
-			},
-		},
-	}
-
-	hc.checkAndUpdateDNS(t.Context())
-
-	assert.Empty(t, fn.ups, "the first run doesn't report every endpoint as recovered")
-	assert.Empty(t, fn.downs)
-
-	// DNS updates are still reported on the first run
-	assert.Len(t, fn.dnsOk, 1)
-}
-
-func TestHealthChecker_Notifications_DNSUpdated(t *testing.T) {
-	fn := &fakeNotifier{}
-	mockProvider := dns.NewMockProvider(false)
-	mockProvider.Previous = []string{"9.9.9.9"}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 2, Results: results},
-				ttl:        60,
-				healthyIPs: []string{},
-				failedIPs:  make(map[string]int),
-				provider:   mockProvider,
-			},
-		},
-	}
-
-	hc.checkAndUpdateDNS(t.Context())
-
-	require.Len(t, fn.dnsOk, 1)
-	assert.Equal(t, "example.com//1.1.1.1,2.2.2.2/9.9.9.9", fn.dnsOk[0])
-
-	// A second identical run doesn't change the published values, so there's no notification
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Len(t, fn.dnsOk, 1)
-}
-
-func TestHealthChecker_Notifications_DNSUpdateFailed(t *testing.T) {
-	fn := &fakeNotifier{}
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 2, Results: results},
-				ttl:        60,
-				healthyIPs: []string{},
-				failedIPs:  make(map[string]int),
-				provider:   dns.NewMockProvider(true),
-			},
-		},
-	}
-
-	// Every failing attempt is reported, since the health checker retries on the next cycle
-	hc.checkAndUpdateDNS(t.Context())
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Equal(t, []string{"example.com/", "example.com/"}, fn.dnsErr)
-	assert.Empty(t, fn.dnsOk)
-}
-
-func TestHealthChecker_Notifications_NoRepeatWhileDNSFailing(t *testing.T) {
-	fn := &fakeNotifier{}
-	mockProvider := dns.NewMockProvider(true)
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-		{Name: "endpoint2", IP: "2.2.2.2"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: false, Error: errors.New("down")},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 1, Results: results},
-				ttl:        60,
-				healthyIPs: []string{"1.1.1.1", "2.2.2.2"},
-				dnsValues:  []string{"1.1.1.1", "2.2.2.2"},
-				failedIPs:  make(map[string]int),
-				provider:   mockProvider,
-			},
-		},
-	}
-
-	// Cycle 1: endpoint2 goes down (one notification) and the DNS update fails
-	hc.checkAndUpdateDNS(t.Context())
-	require.Len(t, fn.downs, 1)
-	require.Len(t, fn.dnsErr, 1)
-
-	// Cycle 2: the DNS update fails again, but the endpoint down event doesn't repeat
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Len(t, fn.downs, 1, "down events don't repeat while the DNS update keeps failing")
-	assert.Len(t, fn.dnsErr, 2)
-}
-
-func TestHealthChecker_DNSRetryAfterFailure(t *testing.T) {
-	fn := &fakeNotifier{}
-	mockProvider := dns.NewMockProvider(true)
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "1.1.1.1"},
-	}
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-	}
-	hc := &HealthChecker{
-		notifier: fn,
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    &checker.MockChecker{Domain: "example.com", MaxAttempts: 2, Results: results},
-				ttl:        60,
-				healthyIPs: []string{},
-				failedIPs:  make(map[string]int),
-				provider:   mockProvider,
-			},
-		},
-	}
-
-	// Cycle 1: the DNS update fails
-	hc.checkAndUpdateDNS(t.Context())
-	require.Len(t, fn.dnsErr, 1)
-	assert.Empty(t, fn.dnsOk)
-	require.Equal(t, 1, mockProvider.CallCount)
-
-	// Cycle 2: the failed update is retried even though the published values didn't change, and now succeeds
-	mockProvider.ShouldError = false
-	hc.checkAndUpdateDNS(t.Context())
-	require.Len(t, fn.dnsOk, 1)
-	assert.Len(t, fn.dnsErr, 1)
-	require.Equal(t, 2, mockProvider.CallCount)
-
-	// Cycle 3: everything is in sync, so the provider is not called again
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Equal(t, 2, mockProvider.CallCount)
 }

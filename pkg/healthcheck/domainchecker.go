@@ -27,14 +27,21 @@ type domainChecker struct {
 	lastUpdated time.Time
 	lastError   string
 
-	// dnsDirty is true while a DNS update failed and must be retried on the next cycle
-	dnsDirty bool
-
 	// Consecutive successful checks for endpoints that were removed and are recovering
 	recovering map[string]int
 
 	// Priority of each endpoint, by IP
 	priorities map[string]int
+
+	// True if no endpoint is healthy, and the all_unhealthy notification was sent
+	allUnhealthy bool
+
+	// Error of the latest failed DNS update, and the dns_update_failed notification was sent
+	notifiedError string
+
+	// True if the last update of the DNS records failed, so the next check tries again even if the published IPs did not change
+	// Only used by the health check loop
+	updatePending bool
 }
 
 func (dc *domainChecker) getState() (healthyIPs []string, failedIPs map[string]int, dnsValues []string, lastUpdated time.Time, lastError string) {
@@ -63,7 +70,7 @@ func (dc *domainChecker) setState(healthyIPs []string, dnsValues []string, faile
 	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
 	dc.lastError = ""
-	dc.dnsDirty = false
+	dc.updatePending = false
 }
 
 // setStateFailed records a cycle whose DNS update failed: the endpoint state is refreshed, while the DNS values are unchanged and the update is retried on the next cycle
@@ -75,15 +82,7 @@ func (dc *domainChecker) setStateFailed(healthyIPs []string, failedIPs map[strin
 	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
 	dc.lastError = "Error updating DNS records: " + updateErr.Error()
-	dc.dnsDirty = true
-}
-
-// isDNSDirty returns true if a DNS update failed and must be retried
-func (dc *domainChecker) isDNSDirty() bool {
-	dc.lock.Lock()
-	defer dc.lock.Unlock()
-
-	return dc.dnsDirty
+	dc.updatePending = true
 }
 
 // getRecovering returns a copy of the recovery counters
@@ -101,4 +100,24 @@ func (dc *domainChecker) setRecovering(r map[string]int) {
 	defer dc.lock.Unlock()
 
 	dc.recovering = r
+}
+
+// swapAllUnhealthy sets whether the domain has no healthy endpoints, and returns the previous value
+func (dc *domainChecker) swapAllUnhealthy(v bool) bool {
+	dc.lock.Lock()
+	defer dc.lock.Unlock()
+
+	prev := dc.allUnhealthy
+	dc.allUnhealthy = v
+	return prev
+}
+
+// swapNotifiedError sets the error of the latest failed DNS update (empty if the update succeeded), and returns the previous value
+func (dc *domainChecker) swapNotifiedError(v string) string {
+	dc.lock.Lock()
+	defer dc.lock.Unlock()
+
+	prev := dc.notifiedError
+	dc.notifiedError = v
+	return prev
 }

@@ -41,6 +41,9 @@ domains:
   - recordName: "app.example.com"
     provider: "example-provider-1"
     ttl: 120
+    # Type of DNS record to manage: "A" (default) or "CNAME" (Cloudflare provider only)
+    # With "CNAME", the endpoints' ip field holds the target hostname instead of an IP address
+    # recordType: "CNAME"
     endpoints:
       # Endpoints have priority 0 by default, and lower values are preferred
       # DNS only contains the healthy endpoints with the lowest priority value
@@ -60,20 +63,35 @@ providers:
       apiToken: "your-cloudflare-api-token"
       zoneId: "your-zone-id"
 
-# Push notifications (optional)
-# Sends a notification to an ntfy server (like https://ntfy.sh) when endpoints go down or
-# recover, and when DNS records are updated or an update fails.
-# Disabled unless a topic is set. On a public server the topic name acts as a password:
-# pick a hard-to-guess one. To test it: curl -d "test" https://ntfy.sh/<your-topic>
+# Notifications (optional)
 notifications:
-  # ntfy server (defaults to https://ntfy.sh)
-  # server: "https://ntfy.sh"
-  # Topic to publish notifications to; required to enable notifications
-  topic: "ddup-notifications-2f8a1c"
-  # Optional ntfy access token (tk_...) to publish to a protected topic
-  # token: "tk_xxxxxxxxxxxxxxxxxxxx"
-  # Timeout for publishing each notification (defaults to 10s)
-  # timeout: "10s"
+  # Webhooks, with the format "plain" (default), "slack", "discord", or "ntfy"
+  webhooks:
+    - name: "chat"
+      format: "slack"
+      url: "https://hooks.slack.com/services/your-webhook-path"
+      events: ["dns_update_failed", "all_unhealthy"]
+    - name: "alerts"
+      format: "ntfy"
+      # For ntfy, the URL includes the topic name
+      url: "https://ntfy.example.com/ddup"
+      # Optional token, sent as "Bearer <token>"
+      token: "your-ntfy-token"
+      events: ["dns_updated", "dns_update_failed", "all_unhealthy"]
+      # Allow sending to private addresses, such as a ntfy server in your LAN or cluster (default: false)
+      allowPrivateDestinations: true
+      # Optional delivery settings. Defaults: timeout 20s, maxAttempts 3 (including the first), retryInterval 20s
+      timeout: "10s"
+      maxAttempts: 3
+      retryInterval: "20s"
+  # Email
+  emails:
+    - name: "ops"
+      # Connection string for SMTP (smtp://user:password@host:587?fromAddress=...&tls=starttls), AWS SES, SendGrid, Resend
+      connectionString: "smtp://user:password@host:587/?fromAddress=ddup@example.com&tls=starttls"
+      # One email is sent to each recipient
+      to: ["postmaster@example.com"]
+      events: ["dns_update_failed", "all_unhealthy"]
 
 # Enable the web server
 server:

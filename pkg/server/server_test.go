@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/italypaleale/ddup/pkg/buildinfo"
 	"github.com/italypaleale/ddup/pkg/config"
 	"github.com/italypaleale/ddup/pkg/healthcheck"
-	"github.com/italypaleale/ddup/pkg/notify"
 )
 
 type fakeProvider struct {
@@ -98,11 +98,12 @@ func TestForceCheckEndpoint(t *testing.T) {
 
 func TestStaticCacheControl(t *testing.T) {
 	fsys := fstest.MapFS{
-		"index.html":       {Data: []byte("<html></html>")},
+		"index.html":       {Data: []byte("<html><head></head></html>")},
 		"favicon.svg":      {Data: []byte("<svg/>")},
 		"assets/app-1a.js": {Data: []byte("console.log(1)")},
 	}
-	srv := NewCachingFileServer(http.FS(fsys), 31536000)
+	srv, err := NewCachingFileServer(http.FS(fsys), 31536000, buildInfo{})
+	require.NoError(t, err)
 
 	get := func(path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -166,30 +167,6 @@ func TestServerRoutes(t *testing.T) {
 			},
 		},
 	}
-
-	t.Run("GET /api/summary", func(t *testing.T) {
-		srv := newTestServer(t, statuses)
-
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/summary", nil)
-		w := httptest.NewRecorder()
-		srv.handler.ServeHTTP(w, req)
-
-		res := w.Result()
-		require.Equal(t, http.StatusOK, res.StatusCode)
-		assert.Contains(t, res.Header.Get("Content-Type"), "application/json")
-
-		body, err := io.ReadAll(res.Body)
-		require.NoError(t, err)
-
-		var summary StatusSummary
-		require.NoError(t, json.Unmarshal(body, &summary))
-		require.Len(t, summary.Domains, 1)
-		assert.Equal(t, "api.example.com", summary.Domains[0].Name)
-		assert.Equal(t, domainStatusWarning, summary.Domains[0].Status)
-		assert.Equal(t, 1, summary.Domains[0].EndpointsHealthy)
-		assert.Equal(t, 2, summary.Domains[0].EndpointsTotal)
-		assert.Equal(t, 1, summary.Summary.WarningDomains)
-	})
 
 	t.Run("GET /api/status", func(t *testing.T) {
 		srv := newTestServer(t, statuses)
@@ -258,7 +235,7 @@ func TestServerBasePath(t *testing.T) {
 	t.Run("Routes served under the base path", func(t *testing.T) {
 		srv := newServerWithBasePath(t)
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ddup/api/summary", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ddup/api/status", nil)
 		w := httptest.NewRecorder()
 		srv.handler.ServeHTTP(w, req)
 
@@ -266,7 +243,18 @@ func TestServerBasePath(t *testing.T) {
 		require.Equal(t, http.StatusOK, res.StatusCode)
 		body, err := io.ReadAll(res.Body)
 		require.NoError(t, err)
-		assert.Contains(t, string(body), `"totalDomains":1`)
+		assert.Contains(t, string(body), `"provider":"cloudflare"`)
+	})
+
+	t.Run("Build header on API requests under the base path", func(t *testing.T) {
+		srv := newServerWithBasePath(t)
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ddup/api/status", nil)
+		w := httptest.NewRecorder()
+		srv.handler.ServeHTTP(w, req)
+
+		// The build header middleware must see the stripped path to decorate /api/ requests
+		assert.NotEmpty(t, w.Result().Header.Get(headerBuild))
 	})
 
 	t.Run("healthz under the base path", func(t *testing.T) {
@@ -282,150 +270,11 @@ func TestServerBasePath(t *testing.T) {
 	t.Run("API not available at the root", func(t *testing.T) {
 		srv := newServerWithBasePath(t)
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/summary", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/status", nil)
 		w := httptest.NewRecorder()
 		srv.handler.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Result().StatusCode)
-	})
-}
-
-// fakeStatusReporter is a notify.Service that returns static notification data for testing
-type fakeStatusReporter struct {
-	status    notify.Status
-	attempted bool
-	digests   []string
-}
-
-func (f *fakeStatusReporter) NotificationStatus() (notify.Status, bool) {
-	return f.status, f.attempted
-}
-
-func (f *fakeStatusReporter) SendDigest(_ context.Context, digest string) {
-	f.digests = append(f.digests, digest)
-}
-
-func TestNotificationsEndpoint(t *testing.T) {
-	do := func(t *testing.T, opts NewServerOpts) *httptest.ResponseRecorder {
-		t.Helper()
-		s, err := NewServer(opts)
-		require.NoError(t, err)
-		rec := httptest.NewRecorder()
-		s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/notifications", nil))
-		return rec
-	}
-
-	t.Run("disabled by default", func(t *testing.T) {
-		rec := do(t, NewServerOpts{HealthChecker: &fakeProvider{}})
-		require.Equal(t, http.StatusOK, rec.Code)
-		assert.JSONEq(t, `{"enabled": false}`, rec.Body.String())
-	})
-
-	t.Run("enabled without attempts", func(t *testing.T) {
-		rec := do(t, NewServerOpts{HealthChecker: &fakeProvider{}, Notifications: &fakeStatusReporter{}})
-		require.Equal(t, http.StatusOK, rec.Code)
-		assert.JSONEq(t, `{"enabled": true}`, rec.Body.String())
-	})
-
-	t.Run("reports the last successful attempt", func(t *testing.T) {
-		now := time.Now()
-		rec := do(t, NewServerOpts{
-			HealthChecker: &fakeProvider{},
-			Notifications: &fakeStatusReporter{
-				attempted: true,
-				status:    notify.Status{OK: true, LastAttempt: now, LastSuccess: now},
-			},
-		})
-		require.Equal(t, http.StatusOK, rec.Code)
-
-		var res NotificationsResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
-		assert.True(t, res.Enabled)
-		require.NotNil(t, res.OK)
-		assert.True(t, *res.OK)
-		assert.WithinDuration(t, now, *res.LastAttempt, time.Second)
-		assert.WithinDuration(t, now, *res.LastSuccess, time.Second)
-		assert.Empty(t, res.LastError)
-	})
-
-	t.Run("reports the last failed attempt", func(t *testing.T) {
-		rec := do(t, NewServerOpts{
-			HealthChecker: &fakeProvider{},
-			Notifications: &fakeStatusReporter{
-				attempted: true,
-				status:    notify.Status{OK: false, LastAttempt: time.Now(), LastError: "HTTP 403"},
-			},
-		})
-		require.Equal(t, http.StatusOK, rec.Code)
-
-		var res NotificationsResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
-		assert.True(t, res.Enabled)
-		require.NotNil(t, res.OK)
-		assert.False(t, *res.OK)
-		assert.Nil(t, res.LastSuccess, "lastSuccess is omitted until the first successful delivery")
-		assert.Equal(t, "HTTP 403", res.LastError)
-	})
-}
-
-func TestNotificationsTestEndpoint(t *testing.T) {
-	newServer := func(t *testing.T, reporter notify.Service) *Server {
-		t.Helper()
-		s, err := NewServer(NewServerOpts{HealthChecker: &fakeProvider{}, Notifications: reporter})
-		require.NoError(t, err)
-		return s
-	}
-
-	post := func(t *testing.T, s *Server, headers map[string]string) *httptest.ResponseRecorder {
-		t.Helper()
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/notifications/test", nil)
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		rec := httptest.NewRecorder()
-		s.handler.ServeHTTP(rec, req)
-		return rec
-	}
-
-	t.Run("requires the header", func(t *testing.T) {
-		reporter := &fakeStatusReporter{}
-		s := newServer(t, reporter)
-
-		rec := post(t, s, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
-		assert.Empty(t, reporter.digests, "no notification is sent without the header")
-	})
-
-	t.Run("conflict when notifications are disabled", func(t *testing.T) {
-		s := newServer(t, nil)
-
-		rec := post(t, s, map[string]string{headerRequestedBy: requestedByValue})
-		assert.Equal(t, http.StatusConflict, rec.Code)
-		assert.Contains(t, rec.Body.String(), "api_notifications_disabled")
-	})
-
-	t.Run("sends the current status digest", func(t *testing.T) {
-		reporter := &fakeStatusReporter{}
-		s := newServer(t, reporter)
-
-		rec := post(t, s, map[string]string{headerRequestedBy: requestedByValue})
-		assert.Equal(t, http.StatusAccepted, rec.Code)
-
-		require.Len(t, reporter.digests, 1)
-		// The fakeProvider reports the domain "a.example.com" with no endpoints
-		assert.Equal(t, "a.example.com: unhealthy, 0/0 endpoints up", reporter.digests[0])
-	})
-
-	t.Run("GET does not send", func(t *testing.T) {
-		reporter := &fakeStatusReporter{}
-		s := newServer(t, reporter)
-
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/notifications/test", nil)
-		req.Header.Set(headerRequestedBy, requestedByValue)
-		rec := httptest.NewRecorder()
-		s.handler.ServeHTTP(rec, req)
-		assert.NotEqual(t, http.StatusAccepted, rec.Code)
-		assert.Empty(t, reporter.digests)
 	})
 }
 
@@ -520,9 +369,10 @@ func TestCORS(t *testing.T) {
 
 func TestStaticIfModifiedSince(t *testing.T) {
 	fsys := fstest.MapFS{
-		"index.html": {Data: []byte("<html></html>")},
+		"index.html": {Data: []byte("<html><head></head></html>")},
 	}
-	srv := NewCachingFileServer(http.FS(fsys), 60)
+	srv, err := NewCachingFileServer(http.FS(fsys), 60, buildInfo{})
+	require.NoError(t, err)
 
 	get := func(t *testing.T, ifModifiedSince string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -548,7 +398,7 @@ func TestStaticIfModifiedSince(t *testing.T) {
 	// A copy from before the server started is stale
 	rec = get(t, time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "<html></html>", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "<html>")
 
 	// Invalid dates are ignored
 	rec = get(t, "not a date")
@@ -625,4 +475,65 @@ func TestServerRun(t *testing.T) {
 		_ = ln.Close()
 		require.ErrorContains(t, waitForRun(t, runErr), "app server failed")
 	})
+}
+
+// Sets the build info for the duration of the test
+func setBuildInfo(t *testing.T, version, id, commit, date string) {
+	t.Helper()
+	oldVersion, oldID, oldCommit, oldDate := buildinfo.AppVersion, buildinfo.BuildId, buildinfo.CommitHash, buildinfo.BuildDate
+	t.Cleanup(func() {
+		buildinfo.AppVersion, buildinfo.BuildId, buildinfo.CommitHash, buildinfo.BuildDate = oldVersion, oldID, oldCommit, oldDate
+	})
+	buildinfo.AppVersion, buildinfo.BuildId, buildinfo.CommitHash, buildinfo.BuildDate = version, id, commit, date
+}
+
+func TestBuildHeader(t *testing.T) {
+	setBuildInfo(t, "1.2.3", "build-42", "0123456789abcdef", "2026-01-02T03:04:05Z")
+
+	s, err := NewServer(NewServerOpts{HealthChecker: &fakeProvider{}})
+	require.NoError(t, err)
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		return rec
+	}
+
+	t.Run("API responses have the build", func(t *testing.T) {
+		rec := get("/api/status")
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "1.2.3|build-42|0123456789abcdef", rec.Header().Get(headerBuild))
+		// The response is the same as before
+		assert.JSONEq(t, `{"a.example.com":{"lastUpdated":"0001-01-01T00:00:00Z","provider":"p","endpoints":null}}`, rec.Body.String())
+	})
+
+	t.Run("matches the build in the page", func(t *testing.T) {
+		info := newBuildInfo()
+		page, err := info.insertIntoPage([]byte("<head></head>"))
+		require.NoError(t, err)
+
+		var got buildInfo
+		require.NoError(t, json.Unmarshal([]byte(extractBuildScript(t, string(page))), &got))
+		assert.Equal(t, get("/api/status").Header().Get(headerBuild), got.Build)
+	})
+
+	t.Run("errors from the API have it too", func(t *testing.T) {
+		rec := get("/api/status/unknown")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.NotEmpty(t, rec.Header().Get(headerBuild))
+	})
+
+	t.Run("GET /api/info is gone", func(t *testing.T) {
+		assert.Equal(t, http.StatusNotFound, get("/api/info").Code)
+	})
+
+	t.Run("other paths don't have it", func(t *testing.T) {
+		assert.Empty(t, get("/healthz").Header().Get(headerBuild))
+	})
+}
+
+func TestBuildIdentifier(t *testing.T) {
+	assert.Equal(t, "1.2.3|build-42|abc", buildIdentifier("1.2.3", "build-42", "abc"))
+	assert.Equal(t, "canary||", buildIdentifier("canary", "", ""))
+	assert.Equal(t, "a_b_c|_|", buildIdentifier("a\nb\u00e9c", "\x7f", ""))
 }

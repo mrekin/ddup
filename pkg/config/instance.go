@@ -31,7 +31,6 @@ func Get() *Config {
 }
 
 // GetDefaultConfig returns the default configuration.
-// Notifications defaults are not seeded here: the zero value means disabled, and the server and timeout defaults are applied by Validate when a topic is set.
 func GetDefaultConfig() *Config {
 	return &Config{
 		Interval: 30 * time.Second,

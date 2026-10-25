@@ -12,9 +12,6 @@ var (
 	errCheckForbidden        = newApiError("api_check_forbidden", http.StatusForbidden, "Missing or invalid "+headerRequestedBy+" header")
 	errCheckTimeout          = newApiError("api_check_timeout", http.StatusGatewayTimeout, "The check did not complete in time; it may still finish in the background")
 	errCheckFailed           = newApiError("api_check_failed", http.StatusServiceUnavailable, "Could not run the check")
-
-	errNotificationsForbidden = newApiError("api_notifications_forbidden", http.StatusForbidden, "Missing or invalid "+headerRequestedBy+" header")
-	errNotificationsDisabled  = newApiError("api_notifications_disabled", http.StatusConflict, "Notifications are not configured")
 )
 
 type apiError struct {
