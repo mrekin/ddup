@@ -130,7 +130,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 
 		// Get the list of currently healthy and failed IPs
 		// We clone the failed IPs map to prevent concurrent access
-		currentHealthyIPs, failedIPs, _, _, _ := dc.getState()
+		currentHealthyIPs, failedIPs, lastUpdated, lastError := dc.getState()
 		failedIPs = maps.Clone(failedIPs)
 
 		// Perform health checks for this domain
@@ -230,6 +230,9 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		} else {
 			domainLog.DebugContext(ctx, "Published IPs unchanged, skipping DNS update", "healthy", newHealthyIPs, "published", publishIPs)
 		}
+
+		// Record the state changes, so they match what the status reports
+		dc.recordCycle(results, newHealthyIPs)
 
 		// Update the stored state, also when the update failed, so the health of the endpoints keeps being tracked
 		if err != nil {
