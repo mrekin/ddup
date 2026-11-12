@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /home/vardas/ddup grep -n 'basePath\\\\|BasePath' -- 'pkg' 'dashboard/src')",
+      "Bash(git -C /home/vardas/ddup log --oneline --no-merges upstream/main..HEAD)",
+      "Bash(git -C /home/vardas/ddup grep -ln 'ntfy' -- pkg)",
+      "Bash(git -C /home/vardas/ddup-upstream grep -ln 'ntfy' -- pkg)",
+      "Bash(git -C /home/vardas/ddup-upstream grep -ln 'summary' -- pkg/server cmd)",
+      "Bash(go mod *)",
+      "Bash(go env *)",
+      "Bash(grep -n 'KnownFields' \"$\\(go env GOMODCACHE\\)/github.com/italypaleale/go-kit@v1.6.0/configkit/config.go\")",
+      "Bash(git add *)",
+      "Bash(git rm *)"
+    ]
+  }
+}

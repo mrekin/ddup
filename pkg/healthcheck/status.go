@@ -3,6 +3,8 @@ package healthcheck
 import (
 	"slices"
 	"time"
+
+	"github.com/italypaleale/ddup/pkg/dns"
 )
 
 type DomainStatus struct {
@@ -13,9 +15,14 @@ type DomainStatus struct {
 }
 
 type DomainStatusEndpoint struct {
-	Healthy      bool   `json:"healthy"`
-	IP           string `json:"ip"`
-	FailureCount int    `json:"failureCount,omitempty"`
+	Healthy bool `json:"healthy"`
+	// What the endpoint publishes: its IP address, or its CNAME hostname
+	Target string `json:"target"`
+	// Type of the DNS record for the endpoint: "A", "AAAA" or "CNAME"
+	Type string `json:"type,omitempty"`
+	// True if the record is proxied by the DNS provider
+	Proxied      bool `json:"proxied,omitempty"`
+	FailureCount int  `json:"failureCount,omitempty"`
 	// When the endpoint last changed state, from healthy to failing or the other way around
 	Since *time.Time `json:"since,omitempty"`
 	// True if `since` is when ddup first checked the endpoint, not a state change, so the real start is unknown
@@ -27,9 +34,6 @@ type DomainStatusEndpoint struct {
 	// First failed check of the current run of failures
 	// Left out when the last check passed, so it is set for an endpoint in the warning state
 	FirstFailure *time.Time `json:"firstFailure,omitempty"`
-	// InDNS is true if this endpoint's value is currently written in the DNS record.
-	// Relevant for CNAME records, which hold a single value
-	InDNS bool `json:"inDns,omitempty"`
 }
 
 func (hc *HealthChecker) GetAllDomainsStatus() map[string]DomainStatus {
@@ -52,12 +56,12 @@ func (hc *HealthChecker) GetDomainStatus(domain string) *DomainStatus {
 
 func (hc *HealthChecker) getStatusObject(dc *domainChecker) DomainStatus {
 	healthy, unhealthy, lastUpdated, lastError := dc.getState()
+	targets := dc.getTargets()
 
-	// Endpoints in the unhealthy list could also be in the healthy one,
-	// if they failed a recent health check but still less than the max attempts
+	// Endpoints in the unhealthy list could also be in the healthy one, if they failed a recent health check but still less than the max attempts
 	endpoints := make([]DomainStatusEndpoint, 0, len(healthy)+len(unhealthy))
 	for _, ip := range healthy {
-		endpoints = append(endpoints, dc.getDomainStatusEndpoint(ip, true, unhealthy[ip], slices.Contains(dnsValues, ip)))
+		endpoints = append(endpoints, dc.getDomainStatusEndpoint(ip, true, unhealthy[ip], targets[ip]))
 	}
 	for ip, attempts := range unhealthy {
 		// Endpoints that are still in the healthy list were added above
@@ -66,7 +70,7 @@ func (hc *HealthChecker) getStatusObject(dc *domainChecker) DomainStatus {
 			continue
 		}
 
-		endpoints = append(endpoints, dc.getDomainStatusEndpoint(ip, false, attempts, false))
+		endpoints = append(endpoints, dc.getDomainStatusEndpoint(ip, false, attempts, targets[ip]))
 	}
 
 	return DomainStatus{
@@ -78,12 +82,13 @@ func (hc *HealthChecker) getStatusObject(dc *domainChecker) DomainStatus {
 }
 
 // getDomainStatusEndpoint returns the DomainStatusEndpoint object
-func (dc *domainChecker) getDomainStatusEndpoint(ip string, isHealthy bool, failureCount int, inDNS bool) DomainStatusEndpoint {
+func (dc *domainChecker) getDomainStatusEndpoint(ip string, isHealthy bool, failureCount int, target dns.Target) DomainStatusEndpoint {
 	e := DomainStatusEndpoint{
 		Healthy:      isHealthy,
-		IP:           ip,
+		Target:       ip,
+		Type:         target.Type,
+		Proxied:      target.Proxied,
 		FailureCount: failureCount,
-		InDNS:        inDNS,
 	}
 
 	times := dc.getTimes(ip)

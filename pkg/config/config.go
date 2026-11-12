@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"reflect"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,14 +52,6 @@ type ConfigDomain struct {
 	// Name of the DNS provider as configured in the `providers` dictionary.
 	// +required
 	Provider string `yaml:"provider"`
-
-	// Type of DNS record to manage for this domain.
-	// Supported values: "A" (default) and "CNAME".
-	// CNAME records are supported by the Cloudflare provider only.
-	// The endpoints' `ip` field carries the record value: for CNAME domains it is the
-	// target hostname (e.g. "ref"), not an IP address.
-	// +default "A"
-	RecordType string `yaml:"recordType"`
 
 	// TTL for the created records, in seconds
 	// +default 60
@@ -125,10 +120,16 @@ type ConfigEndpoint struct {
 	// +required
 	URL string `yaml:"url"`
 
-	// IP address to include in DNS records when healthy.
-	// For domains with recordType "CNAME", this is the CNAME target hostname instead.
-	// +required
+	// IP address to include in DNS records when healthy
+	// IPv4 addresses are published as A records and IPv6 addresses as AAAA records
+	// Exactly one of `ip` and `cname` is required
 	IP string `yaml:"ip"`
+
+	// Hostname to publish in a CNAME record when healthy
+	// A CNAME record can't coexist with other records, so an endpoint with `cname` must be the only one with its priority
+	// Only supported by some DNS providers
+	// Exactly one of `ip` and `cname` is required
+	CNAME string `yaml:"cname"`
 
 	// Optional priority of the endpoint
 	// Only the healthy endpoints with the lowest priority value are published: if none of them are healthy, ddup falls back to the next priority
@@ -140,6 +141,53 @@ type ConfigEndpoint struct {
 	// Hostname to include in the requests
 	// This can be used when the request is made to an IP address or to a hostname different from the desired one
 	Host string `yaml:"host"`
+
+	// Options that apply only when the domain uses a specific DNS provider
+	ProviderOptions ConfigEndpointProviderOptions `yaml:"providerOptions"`
+}
+
+// ConfigEndpointProviderOptions contains the options for an endpoint that are specific to a DNS provider
+// Each key can be used only when the domain's provider is the one it is named after
+type ConfigEndpointProviderOptions struct {
+	// Options for the Cloudflare provider
+	Cloudflare *ConfigEndpointCloudflareOptions `yaml:"cloudflare"`
+}
+
+// ConfigEndpointCloudflareOptions contains the options for an endpoint that apply to the Cloudflare provider
+type ConfigEndpointCloudflareOptions struct {
+	// If true, the record is proxied by Cloudflare
+	// Works with both `ip` and `cname`
+	// All endpoints with the same priority must use the same value, because the records published together are either all proxied or all DNS-only
+	// +default false
+	Proxied bool `yaml:"proxied"`
+}
+
+// IsProxied returns true if the endpoint is proxied using Cloudflare
+func (cf *ConfigEndpointCloudflareOptions) IsProxied() bool {
+	if cf == nil {
+		return false
+	}
+
+	return cf.Proxied
+}
+
+// Keys returns the keys of the options that are set, which are named after the DNS providers they are for
+func (o ConfigEndpointProviderOptions) Keys() []string {
+	var keys []string
+	if o.Cloudflare != nil {
+		keys = append(keys, "cloudflare")
+	}
+	return keys
+}
+
+// Target returns what the endpoint publishes in DNS, which is its IP address or its CNAME hostname
+// It is unique among the endpoints of a domain
+func (e *ConfigEndpoint) Target() string {
+	if e.CNAME != "" {
+		return e.CNAME
+	}
+
+	return e.IP
 }
 
 type ConfigProvider struct {
@@ -292,7 +340,7 @@ func (c *Config) Validate(logger *slog.Logger) error {
 
 	// Require at least one domain to be configured
 	if len(c.Domains) == 0 {
-		return errors.New("no domains configured; specify at least one domain under 'domains'")
+		return errors.New("no domains configured, specify at least one domain under 'domains'")
 	}
 
 	// Validate domains
@@ -330,12 +378,6 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			return fmt.Errorf("domain %s is invalid: healthChecks.recoverAfter must not be negative", d.RecordName)
 		}
 
-		// Validate the record type; the default is "A"
-		err = validateRecordType(d, c.Providers[d.Provider])
-		if err != nil {
-			return err
-		}
-
 		// Default TTL is 120s
 		if d.TTL <= 0 {
 			d.TTL = 120
@@ -346,19 +388,21 @@ func (c *Config) Validate(logger *slog.Logger) error {
 			if v.URL == "" {
 				return fmt.Errorf("domain %s endpoint %d is invalid: URL is empty", d.RecordName, ei)
 			}
-			if v.IP == "" {
-				return fmt.Errorf("domain %s endpoint %d is invalid: IP is empty", d.RecordName, ei)
-			}
 			if v.Priority < 0 {
 				return fmt.Errorf("domain %s endpoint %d is invalid: priority must not be negative", d.RecordName, ei)
 			}
-			err := validateEndpointIP(d, ei, v)
+			err = v.validateTarget(d.RecordName)
 			if err != nil {
-				return err
+				return fmt.Errorf("domain %s endpoint %d is invalid: %w", d.RecordName, ei, err)
 			}
 			if v.Name == "" {
 				v.Name = v.URL
 			}
+		}
+
+		err = d.validateDomainEndpoints()
+		if err != nil {
+			return err
 		}
 	}
 
@@ -369,6 +413,99 @@ func (c *Config) Validate(logger *slog.Logger) error {
 	}
 
 	return nil
+}
+
+// validateTarget checks what the endpoint publishes, and sanitizes it
+func (e *ConfigEndpoint) validateTarget(recordName string) error {
+	switch {
+	case (e.IP != "" && e.CNAME != "") ||
+		(e.IP == "" && e.CNAME == ""):
+		return errors.New("exactly one of 'ip' or 'cname' must be set")
+	case e.IP != "":
+		ip, err := netip.ParseAddr(e.IP)
+		if err != nil {
+			return fmt.Errorf("IP %q is not a valid IPv4 or IPv6 address", e.IP)
+		}
+
+		e.IP = ip.String()
+	case e.CNAME != "":
+		cname, err := normalizeHostname(e.CNAME)
+		if err != nil {
+			return fmt.Errorf("cname %w", err)
+		}
+
+		if cname == normalizeRecordName(recordName) {
+			return fmt.Errorf("cname %q is the domain's own record name", cname)
+		}
+
+		e.CNAME = cname
+	}
+
+	return nil
+}
+
+// validateDomainEndpoints checks the rules that involve all the endpoints of a domain
+// It must be called after each endpoint has been validated
+func (d *ConfigDomain) validateDomainEndpoints() error {
+	type priorityGroup struct {
+		count int
+		cname bool
+	}
+	groups := make(map[int]*priorityGroup, len(d.Endpoints))
+	targets := make(map[string]int, len(d.Endpoints))
+
+	for ei, e := range d.Endpoints {
+		prev, dup := targets[e.Target()]
+		if dup {
+			return fmt.Errorf("domain %s endpoint %d is invalid: %s is already used by endpoint %d", d.RecordName, ei, e.Target(), prev)
+		}
+		targets[e.Target()] = ei
+
+		g := groups[e.Priority]
+		if g == nil {
+			g = &priorityGroup{}
+			groups[e.Priority] = g
+		}
+		g.count++
+		g.cname = g.cname || e.CNAME != ""
+	}
+
+	for _, priority := range slices.Sorted(maps.Keys(groups)) {
+		g := groups[priority]
+		if g.cname && g.count > 1 {
+			return fmt.Errorf("domain %s is invalid: priority %d has an endpoint with cname and other endpoints, but a CNAME record can't coexist with other records: give the endpoint with cname its own priority", d.RecordName, priority)
+		}
+	}
+
+	return nil
+}
+
+var hostnameLabelRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$`)
+
+// normalizeRecordName lowercases a record name and removes the trailing dot
+func normalizeRecordName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+}
+
+// normalizeHostname lowercases a hostname, removes the trailing dot, and checks that it's valid and isn't an IP address
+func normalizeHostname(name string) (string, error) {
+	name = normalizeRecordName(name)
+	if name == "" || len(name) > 253 {
+		return "", fmt.Errorf("%q is not a valid hostname", name)
+	}
+
+	_, err := netip.ParseAddr(name)
+	if err == nil {
+		return "", fmt.Errorf("%q is an IP address, use ip instead", name)
+	}
+
+	for label := range strings.SplitSeq(name, ".") {
+		if !hostnameLabelRegexp.MatchString(label) {
+			return "", fmt.Errorf("%q is not a valid hostname", name)
+		}
+	}
+
+	return name, nil
 }
 
 func countSetProperties(s any) int {

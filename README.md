@@ -6,8 +6,6 @@
 
 **[Read the docs](https://ddup.italypaleale.me)**
 
-> **Fork note:** this is a fork of [ItalyPaleAle/ddup](https://github.com/ItalyPaleAle/ddup) with two additions on top of upstream: CNAME record support (`recordType: CNAME`, Cloudflare provider only) and a `server.basePath` option to serve the dashboard and API under a sub-path. See [`config.sample.yaml`](/config.sample.yaml) for both options.
-
 ddup keeps your DNS records pointed at the servers that are up. It checks each server over HTTP on a schedule, and updates the A and AAAA records of a domain so they list only the healthy ones.
 
 Use it to set up [round-robin DNS](https://en.wikipedia.org/wiki/Round-robin_DNS) for load balancing and failover, for internal or public apps, without running a load balancer.
@@ -20,8 +18,9 @@ ddup isn't a DNS server. It changes the records in the DNS service that already 
 
 - Health checks multiple apps over HTTP or HTTPS
 - Round-robin across all healthy endpoints, or priorities that keep backup servers out of DNS until the main ones fail
-- A records for IPv4 addresses, and AAAA records for IPv6
+- A records for IPv4 addresses, AAAA records for IPv6, and CNAME records with supported providers
 - A dashboard and an API with the health of every domain and endpoint
+- Notifications by webhook or email when DNS changes, an update fails, or a domain has no healthy endpoint
 
 ## Supported DNS providers
 
