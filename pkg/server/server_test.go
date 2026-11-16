@@ -162,8 +162,8 @@ func TestServerRoutes(t *testing.T) {
 			LastUpdated: now,
 			Provider:    "cloudflare",
 			Endpoints: []healthcheck.DomainStatusEndpoint{
-				{Healthy: true, IP: "203.0.113.10"},
-				{Healthy: false, IP: "203.0.113.11", FailureCount: 5},
+				{Healthy: true, Target: "203.0.113.10"},
+				{Healthy: false, Target: "203.0.113.11", FailureCount: 5},
 			},
 		},
 	}
@@ -200,7 +200,7 @@ func TestServerBasePath(t *testing.T) {
 			LastUpdated: now,
 			Provider:    "cloudflare",
 			Endpoints: []healthcheck.DomainStatusEndpoint{
-				{Healthy: true, IP: "203.0.113.10"},
+				{Healthy: true, Target: "203.0.113.10"},
 			},
 		},
 	}

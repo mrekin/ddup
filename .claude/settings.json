@@ -10,7 +10,18 @@
       "Bash(go env *)",
       "Bash(grep -n 'KnownFields' \"$\\(go env GOMODCACHE\\)/github.com/italypaleale/go-kit@v1.6.0/configkit/config.go\")",
       "Bash(git add *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(go test *)",
+      "Bash(which go *)",
+      "Read(//usr/local/go/bin/**)",
+      "Bash(git commit -m 'Merge upstream/main: replace CNAME implementation, add providerOptions.cloudflare.proxied, and upstream changes *)",
+      "Bash(git log *)",
+      "Read(//etc/**)",
+      "Bash(ls Makefile; grep -rn 'gen-config' Makefile 2>/dev/null | head -3; find /home/vardas/ddup -maxdepth 2 -name 'Makefile' -o -maxdepth 1 -name '*.mk' | head; echo '==='; which go pnpm node 2>/dev/null; ls /usr/lib/go*/bin/go /opt/go/bin/go 2>/dev/null)",
+      "Read(//usr/lib/**)",
+      "Bash(git -C /home/vardas/ddup log --oneline --all --diff-filter=D --name-only -1 -- '*gen-config*')",
+      "Bash(sudo -n true)",
+      "Bash(docker run *)"
     ]
   }
 }

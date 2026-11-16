@@ -146,30 +146,23 @@ func (dc *domainChecker) getState() (healthyIPs []string, failedIPs map[string]i
 
 	return dc.healthyIPs, dc.failedIPs, dc.lastUpdated, dc.lastError
 }
-}
 
-func (dc *domainChecker) setState(healthyIPs []string, dnsValues []string, failedIPs map[string]int) {
+func (dc *domainChecker) setState(healthyIPs []string, failedIPs map[string]int) {
 	dc.lock.Lock()
 	defer dc.lock.Unlock()
 
 	dc.healthyIPs = healthyIPs
-	dc.dnsValues = dnsValues
 	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
 	dc.lastError = ""
-	dc.updatePending = false
 }
 
-// setStateFailed records a cycle whose DNS update failed: the endpoint state is refreshed, while the DNS values are unchanged and the update is retried on the next cycle
-func (dc *domainChecker) setStateFailed(healthyIPs []string, failedIPs map[string]int, updateErr error) {
+func (dc *domainChecker) setError(err string) {
 	dc.lock.Lock()
 	defer dc.lock.Unlock()
 
-	dc.healthyIPs = healthyIPs
-	dc.failedIPs = failedIPs
 	dc.lastUpdated = time.Now()
-	dc.lastError = "Error updating DNS records: " + updateErr.Error()
-	dc.updatePending = true
+	dc.lastError = err
 }
 
 // getRecovering returns a copy of the recovery counters

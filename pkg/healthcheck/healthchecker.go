@@ -122,12 +122,14 @@ func (hc *HealthChecker) ForceCheck(ctx context.Context) error {
 
 // checkAndUpdateDNS performs health checks and updates DNS if needed
 func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
+	var err error
+
 	for domainName, dc := range hc.domainCheckers {
 		domainLog := slog.With("domain", domainName)
 
 		// Get the list of currently healthy and failed IPs
 		// We clone the failed IPs map to prevent concurrent access
-		currentHealthyIPs, failedIPs, lastUpdated, lastError := dc.getState()
+		currentHealthyIPs, failedIPs, _, _ := dc.getState()
 		failedIPs = maps.Clone(failedIPs)
 
 		// Perform health checks for this domain
@@ -210,6 +212,7 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 				res, err = dc.provider.UpdateRecords(ctx, dc.checker.GetDomain(), dc.ttl, publishTargets)
 				if err != nil {
 					domainLog.ErrorContext(ctx, "Error updating DNS records", "error", err)
+					updateErr = "Error updating DNS records: " + err.Error()
 					hc.notifyUpdateFailed(dc, domainName, endpointStates, publishIPs, previousPublishIPs, err)
 
 					// Try again at the next check, even if the published targets do not change
@@ -244,10 +247,11 @@ func (hc *HealthChecker) checkAndUpdateDNS(ctx context.Context) {
 		dc.recordCycle(results, newHealthyIPs)
 
 		// Update the stored state, also when the update failed, so the health of the endpoints keeps being tracked
-		if err != nil {
-			dc.setStateFailed(newHealthyIPs, failedIPs, err)
-		} else {
-			dc.setState(newHealthyIPs, publishIPs, failedIPs)
+		dc.setState(newHealthyIPs, failedIPs)
+
+		// The state resets the error, so it is set again after it
+		if updateErr != "" {
+			dc.setError(updateErr)
 		}
 	}
 }

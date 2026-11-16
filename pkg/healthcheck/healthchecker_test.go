@@ -145,7 +145,6 @@ func TestHealthChecker_RetryLogic(t *testing.T) {
 				checker:    mockChecker,
 				ttl:        60,
 				healthyIPs: []string{"1.1.1.1", "2.2.2.2"}, // endpoint2 was previously healthy
-				dnsValues:  []string{"1.1.1.1", "2.2.2.2"}, // ...and was already written to DNS
 				failedIPs:  make(map[string]int),
 				provider:   mockProvider,
 			},
@@ -262,14 +261,10 @@ func TestHealthChecker_DNSProviderError(t *testing.T) {
 	// Run the check
 	hc.checkAndUpdateDNS(t.Context())
 
-	// The endpoint state is refreshed even though the DNS update failed, and the health of the endpoints is tracked anyway
+	// The error is reported, and the health of the endpoints is tracked anyway
 	assert.Equal(t, 1, mockProvider.CallCount)
 	assert.Equal(t, "Error updating DNS records: mock error", dc.lastError)
-	assert.Equal(t, []string{"1.1.1.1"}, dc.healthyIPs, "the endpoint state is refreshed even though the DNS update failed")
-	// The DNS values are unchanged, since nothing was written, and the update is flagged for retry
-	assert.Empty(t, dc.dnsValues, "Expected DNS values to remain unchanged due to DNS error")
-	assert.True(t, dc.updatePending, "Expected the DNS update to be retried")
-	assert.NotEmpty(t, hc.GetDomainStatus("example.com").Error, "Expected the error to be reported in the status")
+	assert.Equal(t, []string{"1.1.1.1"}, dc.healthyIPs)
 
 	// The next check tries again, even if the published IPs did not change
 	hc.checkAndUpdateDNS(t.Context())
@@ -378,7 +373,6 @@ func TestHealthChecker_NoChangeSkipsUpdate(t *testing.T) {
 				checker:    mockChecker,
 				ttl:        60,
 				healthyIPs: []string{"1.1.1.1", "2.2.2.2"}, // Same as what will be returned
-				dnsValues:  []string{"1.1.1.1", "2.2.2.2"}, // ...and already written to DNS
 				failedIPs:  make(map[string]int),
 				provider:   mockProvider,
 			},
@@ -473,69 +467,6 @@ func TestHealthChecker_MultipleDomains(t *testing.T) {
 
 	assert.Equal(t, 1, mockProvider1.CallCount)
 	assert.Equal(t, 1, mockProvider2.CallCount)
-}
-
-func TestHealthChecker_CNAMEMultipleHealthy(t *testing.T) {
-	// Create mock provider that should not error
-	mockProvider := dns.NewMockProvider(false)
-
-	// Create mock endpoints
-	endpoints := []*config.ConfigEndpoint{
-		{Name: "endpoint1", IP: "main.example.com"},
-		{Name: "endpoint2", IP: "slave.example.com"},
-	}
-
-	// Create mock health check results - all healthy
-	results := []checker.Result{
-		{Endpoint: endpoints[0], Healthy: true},
-		{Endpoint: endpoints[1], Healthy: true},
-	}
-
-	// Create mock checker
-	mockChecker := &checker.MockChecker{
-		Domain:      "example.com",
-		MaxAttempts: 2,
-		Results:     results,
-	}
-
-	// Create the test HealthChecker for a CNAME domain
-	hc := &HealthChecker{
-		domainCheckers: map[string]*domainChecker{
-			"example.com": {
-				checker:    mockChecker,
-				ttl:        60,
-				healthyIPs: []string{},
-				failedIPs:  make(map[string]int),
-				provider:   mockProvider,
-			},
-		},
-	}
-
-	// Run the check
-	hc.checkAndUpdateDNS(t.Context())
-
-	dc := hc.domainCheckers["example.com"]
-
-	// All healthy endpoints are kept in the state (they are visible in the dashboard/API)
-	assert.ElementsMatch(t, []string{"main.example.com", "slave.example.com"}, dc.healthyIPs)
-
-	// Only the first healthy value (config order) is written to DNS
-	assert.Equal(t, []string{"main.example.com"}, dc.dnsValues)
-	assert.Equal(t, 1, mockProvider.CallCount)
-	assert.Equal(t, "main.example.com", mockProvider.CNAMETarget)
-
-	// The status shows both endpoints, with the one in DNS marked
-	status := hc.GetDomainStatus("example.com")
-	require.NotNil(t, status)
-	require.Len(t, status.Endpoints, 2)
-	for _, ep := range status.Endpoints {
-		assert.True(t, ep.Healthy)
-		assert.Equal(t, ep.IP == "main.example.com", ep.InDNS, "only the CNAME target should be marked as in DNS")
-	}
-
-	// A second run with the same results must not update DNS again
-	hc.checkAndUpdateDNS(t.Context())
-	assert.Equal(t, 1, mockProvider.CallCount)
 }
 
 func TestHealthChecker_RecoverAfter(t *testing.T) {
@@ -747,14 +678,6 @@ func TestNewHealthChecker(t *testing.T) {
 	t.Run("nil provider", func(t *testing.T) {
 		_, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": nil}, nil)
 		require.ErrorContains(t, err, "DNS provider 'p2' that is not configured")
-	})
-
-	t.Run("notifier is stored", func(t *testing.T) {
-		fn := &recordingNotifier{}
-		hc, err := NewHealthChecker(map[string]dns.Provider{"p1": dns.NewMockProvider(false), "p2": dns.NewMockProvider(false)}, nil)
-		require.NoError(t, err)
-		hc.SetNotifier(fn)
-		assert.Same(t, fn, Notifier(fn))
 	})
 }
 
